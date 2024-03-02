@@ -45,6 +45,7 @@
 
 #include "shader_enums.h"
 
+#include "util/macros.h"
 #include "util/mesa-blake3.h"
 
 struct vk_pipeline_binary {
@@ -1139,7 +1140,7 @@ struct vk_graphics_pipeline {
    };
 
    uint32_t set_layout_count;
-   struct vk_descriptor_set_layout *set_layouts[MESA_VK_MAX_DESCRIPTOR_SETS];
+   struct vk_descriptor_set_layout **set_layouts;
 
    uint32_t stage_count;
    struct vk_pipeline_stage stages[MESA_VK_MAX_GRAPHICS_PIPELINE_STAGES];
@@ -1160,6 +1161,7 @@ vk_graphics_pipeline_destroy(struct vk_device *device,
       if (gfx_pipeline->set_layouts[i] != NULL)
          vk_descriptor_set_layout_unref(device, gfx_pipeline->set_layouts[i]);
    }
+   vk_free2(&device->alloc, pAllocator, gfx_pipeline->set_layouts);
 
    vk_pipeline_free(device, pAllocator, pipeline);
 }
@@ -2057,6 +2059,18 @@ vk_create_graphics_pipeline(struct vk_device *device,
       is_library ? &pipeline->lib.state : &state_tmp,
       is_library ? &pipeline->lib.all_state : &all_state_tmp,
       pCreateInfo);
+
+   if (compile_info.set_layout_count != 0) {
+      pipeline->set_layouts = vk_zalloc2(
+         &device->alloc, pAllocator,
+         compile_info.set_layout_count * sizeof(struct vk_descriptor_set_layout *),
+         alignof(struct vk_descriptor_set_layout *),
+         VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+      if (pipeline->set_layouts == NULL) {
+         result = vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+         goto fail_stages;
+      }
+   }
 
    /* For pipeline libraries, the state is stored in the pipeline */
    if (!(pipeline->base.flags & VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR)) {
