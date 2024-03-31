@@ -148,13 +148,14 @@ int r600_pipe_shader_create(struct pipe_context *ctx,
 	int processor = sel->ir_type == PIPE_SHADER_IR_TGSI ?
 		tgsi_get_processor_type(sel->tokens):
 		sel->nir->info.stage;
-	
+
+
 	bool dump = r600_can_dump_shader(&rctx->screen->b, processor);
 
 	unsigned export_shader;
-	
+
 	shader->shader.bc.isa = rctx->isa;
-	
+
 	{
 		glsl_type_singleton_init_or_ref();
 		if (sel->ir_type == PIPE_SHADER_IR_TGSI) {
@@ -180,13 +181,13 @@ int r600_pipe_shader_create(struct pipe_context *ctx,
 		if (r)
 			goto error;
 	}
-	
+
 	if (dump) {
 		if (sel->ir_type == PIPE_SHADER_IR_TGSI) {
 			fprintf(stderr, "--TGSI--------------------------------------------------------\n");
 			tgsi_dump(sel->tokens, 0);
 		}
-		
+
 		if (sel->so.num_outputs) {
 			r600_dump_streamout(&sel->so);
 		}
@@ -402,9 +403,10 @@ void *r600_create_vertex_fetch_shader(struct pipe_context *ctx,
 
 		desc = util_format_description(elements[i].src_format);
 
-		if (unlikely(elements[i].src_offset > 65535)) {
-			R600_ERR("too big src_offset: %u\n", elements[i].src_offset);
-			goto fail;
+		if (elements[i].src_offset > 65535) {
+			r600_bytecode_clear(&bc);
+			R600_ERR_F("too big src_offset: %u\n", elements[i].src_offset);
+			return NULL;
 		}
 
 		memset(&vtx, 0, sizeof(vtx));
@@ -644,14 +646,14 @@ static int emit_streamout(struct r600_shader_ctx *ctx, struct pipe_stream_output
 
 	/* Sanity checking. */
 	if (so->num_outputs > PIPE_MAX_SO_OUTPUTS) {
-		R600_ERR("Too many stream outputs: %d\n", so->num_outputs);
+		R600_ERR_F("Too many stream outputs: %d\n", so->num_outputs);
 		r = -EINVAL;
 		goto out_err;
 	}
 	for (i = 0; i < so->num_outputs; i++) {
 		if (so->output[i].output_buffer >= 4) {
-			R600_ERR("Exceeded the max number of stream output buffers, got: %d\n",
-				 so->output[i].output_buffer);
+			R600_ERR_F("Exceeded the max number of stream output buffers, got: %d\n",
+			           so->output[i].output_buffer);
 			r = -EINVAL;
 			goto out_err;
 		}
@@ -1083,4 +1085,3 @@ int generate_gs_copy_shader(struct r600_context *rctx,
 
 	return r600_bytecode_build(ctx.bc);
 }
-
