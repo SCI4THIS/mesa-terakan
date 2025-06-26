@@ -889,13 +889,11 @@ terakan_physical_device_init(
 
       .lower_mul_32x16 = true,
 
-      .vectorize_io = true,
       .vectorize_tess_levels = true,
 
       .lower_to_scalar = true,
       .lower_to_scalar_filter = r600_lower_to_scalar_instr_filter,
 
-      .use_interpolated_input_intrinsics = true,
       .lower_interpolate_at = true,
 
       .lower_mul_2x32_64 = true,
@@ -924,8 +922,6 @@ terakan_physical_device_init(
       /* TODO(Triang3l): Revisit max_unroll_iterations. */
       .max_unroll_iterations = 32,
       .max_unroll_iterations_aggressive = 128,
-
-      .linker_ignore_precision = true,
 
       .lower_int64_options = ~(nir_lower_int64_options)0,
 

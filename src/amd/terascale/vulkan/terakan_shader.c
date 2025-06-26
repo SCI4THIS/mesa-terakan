@@ -163,6 +163,7 @@ terakan_shader_spirv_to_nir(struct terakan_device * const device, size_t const s
 static bool
 terakan_nir_should_vectorize_load_store(unsigned const align_mul, unsigned const align_offset,
                                         unsigned const bit_size, unsigned const num_components,
+                                        int64_t hole_size,
                                         nir_intrinsic_instr * const low,
                                         nir_intrinsic_instr * const high, UNUSED void * data)
 {

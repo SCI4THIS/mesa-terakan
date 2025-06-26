@@ -882,8 +882,8 @@ terakan_pipeline_graphics_pre_rasterization_init(
          pipeline->pre_rasterization.pa_su_poly_offset.clamp = state->rs->depth_bias.clamp;
          pipeline->pre_rasterization.pa_su_poly_offset.subpixel_slope_scale =
             TERAKAN_HW_STATE_DRAW_POLY_OFFSET_SLOPE_SUBPIXELS_IN_PIXEL *
-            state->rs->depth_bias.slope;
-         pipeline->pre_rasterization.pa_su_poly_offset.offset = state->rs->depth_bias.constant;
+            state->rs->depth_bias.slope_factor;
+         pipeline->pre_rasterization.pa_su_poly_offset.offset = state->rs->depth_bias.constant_factor;
          pipeline->pre_rasterization.pa_su_poly_offset.representation =
             state->rs->depth_bias.representation;
          pipeline->pre_rasterization.pa_su_poly_offset.representation_exact =
