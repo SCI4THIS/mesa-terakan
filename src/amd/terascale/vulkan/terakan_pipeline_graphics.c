@@ -1132,7 +1132,7 @@ terakan_pipeline_graphics_create(struct terakan_device * const device,
       uint32_t const * spirv = terakan_pipeline_stage_spirv(stage_info, &spirv_size_bytes);
       assert(spirv != NULL);
 
-      gl_shader_stage const stage_index = vk_to_mesa_shader_stage(stage_info->stage);
+      mesa_shader_stage const stage_index = vk_to_mesa_shader_stage(stage_info->stage);
 
       nir_shader * nir =
          terakan_shader_spirv_to_nir(device, spirv_size_bytes, spirv, stage_index,
@@ -1186,8 +1186,9 @@ terakan_pipeline_graphics_create(struct terakan_device * const device,
    BITSET_ZERO(pipeline->static_state);
    struct vk_graphics_pipeline_all_state all_state;
    struct vk_graphics_pipeline_state state = {};
-   result = vk_graphics_pipeline_state_fill(&device->vk, &state, create_info, NULL, 0, &all_state,
-                                            NULL, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, NULL);
+   result = vk_graphics_pipeline_state_fill(&device->vk, &state, create_info, NULL, NULL, 0,
+                                            &all_state, NULL,
+                                            VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, NULL);
    if (result != VK_SUCCESS) {
       goto fail_shaders;
    }

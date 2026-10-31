@@ -936,7 +936,7 @@ terakan_vertex_input_create_fs_alu_and_fetches(
                   word1_op = EG_V_SQ_ALU_WORD1_OP2_SQ_OP2_INST_LSHL_INT;
                   break;
                default:
-                  unreachable("Unhandled ALU operation");
+                  UNREACHABLE("Unhandled ALU operation");
                }
                slot_words[1] |= S_SQ_ALU_WORD1_OP2_ALU_INST(word1_op);
             }

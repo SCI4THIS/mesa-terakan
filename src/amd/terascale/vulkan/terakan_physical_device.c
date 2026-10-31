@@ -828,9 +828,9 @@ terakan_physical_device_init(
    device->nir_options_non_fs = (nir_shader_compiler_options){
       .lower_fdiv = true,
 
-      .fuse_ffma16 = true,
-      .fuse_ffma32 = true,
-      .fuse_ffma64 = true,
+      .float_mul_add16 = nir_float_muladd_support_has_ffma,
+      .float_mul_add32 = nir_float_muladd_support_has_ffma,
+      .float_mul_add64 = nir_float_muladd_support_has_ffma,
 
       .lower_flrp16 = true,
       .lower_flrp32 = true,
@@ -854,8 +854,6 @@ terakan_physical_device_init(
       .lower_isign = true,
       .lower_fsign = true,
       .lower_iabs = true,
-
-      .lower_ldexp = true,
 
       .lower_pack_unorm_2x16 = true,
       .lower_pack_snorm_2x16 = true,
@@ -937,8 +935,17 @@ terakan_physical_device_init(
       .lower_fquantize2f16 = true,
    };
 
+   /* Non-FS stages support indirect i/o; FS implicitly gets all-io-to-temps by
+    * not advertising support. Previously driven by lower_all_io_to_temps=true on FS. */
+   device->nir_options_non_fs.support_indirect_inputs =
+      BITFIELD_BIT(MESA_SHADER_VERTEX) | BITFIELD_BIT(MESA_SHADER_TESS_CTRL) |
+      BITFIELD_BIT(MESA_SHADER_TESS_EVAL) | BITFIELD_BIT(MESA_SHADER_GEOMETRY) |
+      BITFIELD_BIT(MESA_SHADER_COMPUTE);
+   device->nir_options_non_fs.support_indirect_outputs =
+      device->nir_options_non_fs.support_indirect_inputs;
    device->nir_options_fs = device->nir_options_non_fs;
-   device->nir_options_fs.lower_all_io_to_temps = true;
+   device->nir_options_fs.support_indirect_inputs = 0;
+   device->nir_options_fs.support_indirect_outputs = 0;
 
    /* Must be allocated using calloc because r600_isa_destroy frees it, and r600_isa_destroy also
     * must be called even if r600_isa_init fails.

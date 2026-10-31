@@ -198,7 +198,7 @@ terakan_CreateDescriptorSetLayout(VkDevice const deviceHandle,
     * VkDescriptorSetLayout since other objects hold additional references to them, allocation must
     * be done in the device scope.
     */
-   if (vk_descriptor_set_layout_multizalloc(&device->vk, &multialloc) == NULL) {
+   if (vk_descriptor_set_layout_multizalloc(&device->vk, &multialloc, pCreateInfo) == NULL) {
       vk_free2(&device->vk.alloc, pAllocator, sorted_create_info_bindings);
       return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
    }

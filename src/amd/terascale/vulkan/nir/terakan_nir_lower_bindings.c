@@ -256,7 +256,7 @@ terakan_nir_lower_bindings_instr(nir_builder * const b, nir_instr * const instr,
    struct terakan_nir_lower_bindings_state * const state =
       (struct terakan_nir_lower_bindings_state *)cb_data;
 
-   gl_shader_stage const stage = b->shader->info.stage;
+   mesa_shader_stage const stage = b->shader->info.stage;
 
    struct terakan_descriptor_set_layout_binding const * binding;
    struct terakan_pipeline_layout_set const * set;
@@ -409,7 +409,7 @@ terakan_nir_lower_bindings(nir_shader * const shader,
    do {
       constant_folding_progress = false;
       bool copy_prop_progress = false;
-      NIR_PASS(copy_prop_progress, shader, nir_copy_prop);
+      NIR_PASS(copy_prop_progress, shader, nir_opt_copy_prop);
       if (copy_prop_progress) {
          constant_folding_progress = true;
          /* Cleanup to prevent the same propagations from happening infinitely. */

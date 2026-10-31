@@ -137,7 +137,7 @@ terakan_push_constants_apply(struct terakan_gfx_command_writer * const command_w
       } else {
          unsigned remaining_stages = (unsigned)bind_to_stages;
          while (remaining_stages) {
-            gl_shader_stage const stage_index = vk_to_mesa_shader_stage(
+            mesa_shader_stage const stage_index = vk_to_mesa_shader_stage(
                (VkShaderStageFlagBits)((VkShaderStageFlags)1 << u_bit_scan(&remaining_stages)));
             terakan_hw_state_draw_set_sq_kcache_for_stage[stage_index](
                &command_writer->hw_state_draw, TERAKAN_KCACHE_BUFFER_PUSH_CONSTANTS,
