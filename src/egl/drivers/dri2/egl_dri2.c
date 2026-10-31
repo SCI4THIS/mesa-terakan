@@ -2882,7 +2882,7 @@ dri2_create_sync(_EGLDisplay *disp, EGLenum type, const EGLAttrib *attrib_list)
       }
 #endif
 
-      ret = pthread_cond_init(&dri2_sync->cond, &attr);
+      ret = pthread_cond_init((pthread_cond_t *)&dri2_sync->cond, &attr);
 
       if (ret) {
          _eglError(EGL_BAD_ACCESS, "eglCreateSyncKHR");
