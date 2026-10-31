@@ -88,6 +88,7 @@ libterakan_files = files(
   'terakan_pipeline_layout.h',
   'terakan_push_constants.c',
   'terakan_push_constants.h',
+  'terakan_query.c',
   'terakan_render_pass.c',
   'terakan_queue.c',
   'terakan_queue.h',
@@ -174,7 +175,6 @@ libvulkan_terascale = shared_library(
   include_directories : [
     inc_include,
     inc_src,
-    inc_mapi,
     inc_mesa,
     inc_gallium,
     inc_gallium_aux,
@@ -214,7 +214,8 @@ icd_command = [
   prog_python, '@INPUT0@',
   '--api-version', '1.0',
   '--xml', '@INPUT1@',
-  '--lib-path', join_paths(icd_lib_path, icd_file_name),
+  '--icd-lib-path', icd_lib_path,
+  '--icd-filename', icd_file_name,
   '--out', '@OUTPUT@',
 ]
 if with_platform_windows
@@ -240,7 +241,8 @@ _dev_icd = custom_target(
     prog_python, '@INPUT0@',
     '--api-version', '1.0',
     '--xml', '@INPUT1@',
-    '--lib-path', meson.current_build_dir() / icd_file_name,
+    '--icd-lib-path', meson.current_build_dir(),
+    '--icd-filename', icd_file_name,
     '--out', '@OUTPUT@',
   ],
   build_by_default : true,
