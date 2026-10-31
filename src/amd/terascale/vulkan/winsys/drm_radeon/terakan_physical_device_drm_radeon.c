@@ -288,6 +288,14 @@ terakan_physical_device_drm_radeon_try_create(struct vk_instance * const instanc
    assert(sync_type_count < ARRAY_SIZE(device->sync_types));
    device->sync_types[sync_type_count++] = &terakan_sync_completion_type;
    device->sync_type_binary = vk_sync_binary_get_type(&terakan_sync_completion_type);
+   /* vk_sync_binary_get_type unconditionally wires up .import_sync_file / .export_sync_file
+    * stubs that always fail. WSI's get_sync_file_sync_type uses a non-NULL .import_sync_file
+    * as a proxy for "sync-file capable", so leaving them wired makes WSI pick this type for
+    * dma-buf acquire sync, then the import stub returns VK_ERROR_INVALID_EXTERNAL_HANDLE
+    * instead of VK_ERROR_FEATURE_NOT_PRESENT, failing vkAcquireNextImageKHR. Terakan does
+    * not implement sync-file import/export, so clear the pointers to let WSI fall back. */
+   device->sync_type_binary.sync.import_sync_file = NULL;
+   device->sync_type_binary.sync.export_sync_file = NULL;
    assert(sync_type_count < ARRAY_SIZE(device->sync_types));
    device->sync_types[sync_type_count++] = &device->sync_type_binary.sync;
    assert(sync_type_count < ARRAY_SIZE(device->sync_types));
