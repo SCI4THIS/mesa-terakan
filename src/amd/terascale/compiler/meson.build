@@ -25,6 +25,8 @@ amd_terascale_compiler_files = files(
   '../../../gallium/drivers/r600/sfn/sfn_alu_readport_validation.h',
   '../../../gallium/drivers/r600/sfn/sfn_assembler.cpp',
   '../../../gallium/drivers/r600/sfn/sfn_assembler.h',
+  '../../../gallium/drivers/r600/sfn/sfn_fill_bytecode.cpp',
+  '../../../gallium/drivers/r600/sfn/sfn_fill_bytecode.h',
   '../../../gallium/drivers/r600/sfn/sfn_callstack.cpp',
   '../../../gallium/drivers/r600/sfn/sfn_callstack.h',
   '../../../gallium/drivers/r600/sfn/sfn_conditionaljumptracker.cpp',
@@ -96,6 +98,17 @@ amd_terascale_compiler_files = files(
   '../../../gallium/drivers/r600/sfn/sfn_virtualvalues.h',
 )
 
+amd_terascale_sfn_nir_algebraic_c = custom_target(
+  'amd_terascale_sfn_nir_algebraic_c',
+  input : '../../../gallium/drivers/r600/sfn/sfn_nir_algebraic.py',
+  output : 'sfn_nir_algebraic.c',
+  command : [
+    prog_python, '@INPUT@', '-p', dir_compiler_nir,
+  ],
+  capture : true,
+  depend_files : nir_algebraic_depends,
+)
+
 amd_terascale_compiler_cpp_args = []
 if cpp.has_type('std::pmr::monotonic_buffer_resource', prefix : '#include <memory_resource>')
   amd_terascale_compiler_cpp_args += '-DHAVE_MEMORY_RESOURCE'
@@ -108,13 +121,14 @@ amd_terascale_compiler_includes = [
 
 libamd_terascale_compiler = static_library(
   'amd_terascale_compiler',
-  [amd_terascale_compiler_files],
+  [amd_terascale_compiler_files, amd_terascale_sfn_nir_algebraic_c],
   cpp_args : amd_terascale_compiler_cpp_args,
   include_directories : [
     amd_terascale_compiler_includes,
     # TODO(Triang3l): Remove the following once r600_pipe_common.h isn't referenced anymore.
     inc_gallium,
     inc_gallium_aux,
+    include_directories('../../../gallium/drivers/r600'),
   ],
   dependencies : [idep_amd_terascale_common, idep_mesautil, idep_nir, idep_nir_headers],
   gnu_symbol_visibility : 'hidden',

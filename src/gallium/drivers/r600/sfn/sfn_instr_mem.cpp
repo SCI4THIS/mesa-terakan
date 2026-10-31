@@ -411,9 +411,6 @@ GDSInstr::emit_atomic_counter_comp_swap(nir_intrinsic_instr *instr, Shader& shad
 
    auto dest = read_result ? vf.dest(instr->def, 0, pin_free) : nullptr;
 
-   if (uav_id != nullptr)
-      shader.set_flag(Shader::sh_indirect_atomic);
-
    GDSInstr *ir = nullptr;
 
    if (shader.chip_class() < ISA_CC_CAYMAN) {

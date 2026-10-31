@@ -1592,7 +1592,7 @@ Shader::emit_mbcnt(nir_intrinsic_instr *instr)
    mbcnt_group->add_instruction(new AluInstr(op1_mbcnt_32hi_int,
                                              vf.dummy_dest(1),
                                              mask,
-                                             AluInstr::last));
+                                             std::set<AluModifiers>{alu_write, alu_last_instr}));
    emit_instruction(mbcnt_group);
 
    const nir_src& base_src = instr->src[1];
@@ -1605,7 +1605,7 @@ Shader::emit_mbcnt(nir_intrinsic_instr *instr)
                                     dest,
                                     dest,
                                     vf.src(base_src, 0),
-                                    AluInstr::last_write));
+                                    std::set<AluModifiers>{alu_write, alu_last_instr}));
    }
 
    return true;

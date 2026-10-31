@@ -27,6 +27,14 @@
 /* Maximun number of shader stages in a single graphics pipeline */
 #define MESA_VK_MAX_GRAPHICS_PIPELINE_STAGES 5
 
+/* Soft upper bound for fixed-size per-set arrays in the vk runtime. The main
+ * descriptor set array in vk_pipeline_layout is dynamically allocated and
+ * not bound by this; this bound applies only to the remaining fixed-size
+ * per-set structures (dynamic_descriptor_offset, rt pipeline bookkeeping,
+ * compile_info staging arrays).
+ */
+#define MESA_VK_MAX_DESCRIPTOR_SETS 32
+
 /* From the Vulkan 1.3.274 spec:
  *
  *    VUID-VkPipelineLayoutCreateInfo-pPushConstantRanges-00292
