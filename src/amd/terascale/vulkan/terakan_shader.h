@@ -72,6 +72,14 @@ struct terakan_shader_static {
           */
          uint32_t cb_shader_mask;
       } ps;
+
+      /* Compute workgroup geometry. Each axis is bounded by VK_MAX_COMPUTE_WORKGROUP_SIZE
+       * (1024 on R8xx) — fits in uint16_t. Emitted to R_0286EC/F0/F4_SPI_COMPUTE_NUM_THREAD_X/Y/Z
+       * by `terakan_hw_state_draw_emit_sq_pgm_cs` alongside the CS program registers.
+       */
+      struct {
+         uint16_t workgroup_size[3];
+      } cs;
    } stage;
 };
 
@@ -79,8 +87,11 @@ struct terakan_shader_static {
  * shader objects (for an uncached wrapper implementing VkShaderEXT).
  */
 struct terakan_shader_impl {
-   /* This object owns the BO in `static_state`. */
-   /* TODO(Triang3l): Shader suballocation. */
+   /* This object owns the BO in `static_state`. Each shader allocates its own BO rather than
+    * suballocating from a shared shader-program pool. Suballocation is a GPU-memory-fragmentation
+    * optimization, not a v1.0 correctness gap; revisit alongside the fetch-shader suballocation
+    * note in `terakan_pipeline_graphics.c`.
+    */
    struct terakan_shader_static static_state;
 
    struct terakan_push_constants_usage push_constants_usage;
@@ -113,7 +124,7 @@ nir_shader * terakan_shader_spirv_to_nir(struct terakan_device * device, size_t 
 void terakan_shader_lower_and_optimize_post_link(
    nir_shader * nir, struct terakan_pipeline_layout const * pipeline_layout,
    BITSET_WORD * resources_needed, uint32_t * samplers_needed,
-   uint8_t * fragment_data_uncompacted_locations_out);
+   uint32_t * driver_constants_needed, uint8_t * fragment_data_uncompacted_locations_out);
 
 void terakan_shader_impl_finish(struct terakan_shader_impl * shader,
                                 VkAllocationCallbacks const * allocator);

@@ -96,8 +96,10 @@ terakan_nir_load_raw_resource_buffer(nir_builder * const b, unsigned const num_c
       }
 
       unsigned const load_bytes = component_bytes * load_num_components;
-      /* TODO(Triang3l): Merge as many components as possible into a mega-fetch, and use
-       * mini-fetches.
+      /* Mega-/mini-fetch grouping is a perf optimization: VTX_FETCH natively vectorizes up to the
+       * component count already produced here, so correctness holds. A smarter pre-pass could fuse
+       * adjacent constant-offset loads across intrinsics into one wider fetch, but that is a
+       * post-v1.0 shader-perf workstream.
        */
       nir_def * const loaded_components = nir_load_buffer_resource_r600(
          b, load_num_components, bit_size, resource_index, load_byte_index, .access = access,

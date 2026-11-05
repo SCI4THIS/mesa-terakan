@@ -139,15 +139,32 @@ terakan_barrier_get_src_actions(struct terakan_gfx_command_writer const * const 
             actions |= command_writer->post_depth_stencil_image_copy_write_barrier_actions;
          }
       }
-      /* TODO(Triang3l): Resolve actions. */
+      /* CmdClearColorImage and CmdClearDepthStencilImage write through the CB / DB respectively
+       * (meta clear draws), so they populate the same per-image accumulators as CmdCopyImage2.
+       * Reuse those accumulators here under CLEAR_BIT. The naming is now slightly misleading (the
+       * fields were introduced when only copy commands populated them) but the HW action sets are
+       * identical, so a rename would be pure churn.
+       *
+       * Resolve / blit barrier actions are intentionally omitted: vkCmdResolveImage2 and
+       * vkCmdBlitImage2 are still crash-safe no-op stubs (see meta/terakan_meta_copy_image.c). A
+       * no-op produces no memory write, so their post-write barrier contribution is identically
+       * zero. When a real implementation of either lands it must plumb the matching post-write
+       * action here too.
+       */
+      if (src_stages & VK_PIPELINE_STAGE_2_CLEAR_BIT) {
+         if (for_color_image) {
+            actions |= command_writer->post_color_image_copy_write_barrier_actions;
+         }
+         if (for_depth_stencil_image) {
+            actions |= command_writer->post_depth_stencil_image_copy_write_barrier_actions;
+         }
+      }
       if (src_stages & VK_PIPELINE_STAGE_2_BLIT_BIT) {
          if (for_color_image) {
             actions |= TERAKAN_BARRIER_ACTION_FLUSH_INV_CB_RTV_DATA |
                        TERAKAN_BARRIER_ACTION_FLUSH_INV_CB_RTV_META;
          }
-         /* TODO(Triang3l): Depth/stencil blit actions. */
       }
-      /* TODO(Triang3l): Actions for clears. */
    }
 
    if (src_access & (VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT)) {
@@ -237,7 +254,11 @@ terakan_barrier_get_dst_actions(struct terakan_gfx_command_writer const * const 
             actions |= TERAKAN_BARRIER_ACTION_FLUSH_INV_CB_UAV;
          }
       }
-      /* TODO(Triang3l): Depth/stencil actions. */
+      /* Depth/stencil transfer-write dst barrier actions: deferred alongside the no-op stubs for
+       * vkCmdClearDepthStencilImage / vkCmdBlitImage2 depth/stencil path. The DB-side mirror of
+       * the color-side FLUSH_INV_CB_RTV_DATA / META pair above (i.e. FLUSH_INV_DB_DATA / META)
+       * must be plumbed through here when those real implementations land.
+       */
    }
 
    if ((dst_access &

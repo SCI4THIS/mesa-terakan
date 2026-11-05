@@ -23,6 +23,7 @@
 
 #include "terakan_device.h"
 
+#include "meta/terakan_meta_compute_query_copy.h"
 #include "terakan_command_buffer.h"
 #include "terakan_cp_dma.h"
 #include "terakan_entrypoints.h"
@@ -57,6 +58,8 @@ terakan_device_finish(struct terakan_device * const device)
 
    cnd_destroy(&device->completion_condition);
    mtx_destroy(&device->completion_mutex);
+
+   terakan_device_query_copy_shader_finish(device);
 
    terakan_bo_free(device->meta_shaders_bo, NULL);
 
@@ -206,10 +209,22 @@ terakan_device_init(struct terakan_device * const device,
       terakan_bo_unmap(device->meta_shaders_bo);
    }
 
+   /* Internal compute shaders built from NIR. Owned inline by the device;
+    * teardown is handled by `terakan_device_query_copy_shader_finish` in
+    * `terakan_device_finish`.
+    */
+   memset(&device->query_copy_shader, 0, sizeof(device->query_copy_shader));
+   result = terakan_device_query_copy_shader_init(device);
+   if (result != VK_SUCCESS) {
+      result = vk_errorf(physical_device->vk.instance, result,
+                         "Failed to compile the query-copy reduction shader");
+      goto fail_meta_shaders_bo;
+   }
+
    if (mtx_init(&device->completion_mutex, mtx_plain) != thrd_success) {
       result = vk_errorf(physical_device->vk.instance, VK_ERROR_OUT_OF_HOST_MEMORY,
                          "Failed to initialize the submission mutex");
-      goto fail_meta_shaders_bo;
+      goto fail_query_copy_shader;
    }
    if (cnd_init(&device->completion_condition) != thrd_success) {
       result = vk_errorf(physical_device->vk.instance, VK_ERROR_OUT_OF_HOST_MEMORY,
@@ -264,6 +279,8 @@ fail_queues:
    cnd_destroy(&device->completion_condition);
 fail_completion_mutex:
    mtx_destroy(&device->completion_mutex);
+fail_query_copy_shader:
+   terakan_device_query_copy_shader_finish(device);
 fail_meta_shaders_bo:
    terakan_bo_free(device->meta_shaders_bo, NULL);
 fail_gfx_discard_bo:

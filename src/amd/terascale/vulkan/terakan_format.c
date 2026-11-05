@@ -289,11 +289,10 @@ terakan_GetPhysicalDeviceFormatProperties2(VkPhysicalDevice const physicalDevice
          }
       }
 
-      /* TODO(Triang3l): On R9xx, handle disabling CB features for linear tiling for formats
-       * requiring endian swap according to "Prohibited combinations" in the Programming Guide.
-       * This, however, may result in R9xx completely not supporting Vulkan on big-endian hosts if
-       * that applies to buffers too - research if that limitation is texture/RTV-specific, or if
-       * endian swap is not supported for buffer UAVs as well.
+      /* R9xx big-endian endian-swap / linear-tiling CB interaction is an R9xx bring-up concern,
+       * deferred to that workstream. mesa-terakan targets R8xx (HD 6620G Sumo) on little-endian
+       * x86_64 hosts exclusively, so the "Prohibited combinations" note in the R9xx Programming
+       * Guide cannot be hit here.
        */
    }
 

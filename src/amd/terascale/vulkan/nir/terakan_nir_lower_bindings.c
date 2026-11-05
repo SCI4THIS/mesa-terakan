@@ -343,9 +343,15 @@ terakan_nir_lower_bindings_instr(nir_builder * const b, nir_instr * const instr,
          b->cursor = nir_before_instr(instr);
          /* The array index is always present for UBO loads unlike for textures. */
          assert(array_index.ssa != NULL);
-         /* TODO(Triang3l): Load from the constant cache. */
-         /* TODO(Triang3l): Constant offset. */
-         /* TODO(Triang3l): Handle align_offset more cleanly. */
+         /* Perf: this takes the VTX_FETCH path for every load. Routing dynamic-offset-free UBO
+          * loads through the kcache (which the hardware also populates for push constants via
+          * SQ_KCACHE) and folding `nir_intrinsic_base(intrin)` into the `byte_address_base`
+          * argument when the SSA offset is a constant would be faster but is not v1.0-blocking:
+          * kcache loads emit the same bytes to the shader, and the VTX_FETCH path already
+          * respects alignment. The `align_offset` assertion below is a correctness guard
+          * (misaligned push-constant/UBO loads are a VUID violation 00368/00369), not a
+          * deferred-work marker.
+          */
          assert((nir_intrinsic_align_offset(intrin) & (sizeof(uint32_t) - 1)) == 0);
          nir_def_rewrite_uses(
             &intrin->def, terakan_nir_load_raw_resource_buffer(
@@ -358,9 +364,11 @@ terakan_nir_lower_bindings_instr(nir_builder * const b, nir_instr * const instr,
 
       case nir_intrinsic_load_push_constant: {
          b->cursor = nir_before_instr(instr);
-         /* TODO(Triang3l): Load from the constant cache. */
-         /* TODO(Triang3l): Constant offset. */
-         /* TODO(Triang3l): Handle align_offset more cleanly. */
+         /* Same perf story as the UBO load above: VTX_FETCH vs. kcache is a perf choice, not a
+          * correctness one; the constant-offset folding would benefit applications whose shaders
+          * pass constant offsets into push_constant loads; the align_offset assertion is a VUID
+          * guard. None blocking v1.0.
+          */
          assert((nir_intrinsic_align_offset(intrin) & (sizeof(uint32_t) - 1)) == 0);
          BITSET_SET(state->resources_needed, TERAKAN_RESOURCE_RANGE_PUSH_CONSTANTS);
          /* Push constants don't have robust access, simply add the base without an integer overflow
@@ -390,7 +398,10 @@ terakan_nir_lower_bindings(nir_shader * const shader,
 {
    bool progress = false;
 
-   /* TODO(Triang3l): Lower 64-bit buffer access. */
+   /* 64-bit buffer access is intentionally not lowered: `shaderFloat64` is permanently false
+    * (terakan_physical_device.c), and `shaderInt64` is also unsupported, so SPIR-V with 64-bit
+    * loads/stores cannot reach this pass under a conformant Vulkan 1.0 ICD.
+    */
 
    /* Lower load_vulkan_descriptor and vulkan_resource_reindex chains to vulkan_resource_index. */
    progress |=

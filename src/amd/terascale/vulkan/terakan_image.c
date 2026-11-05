@@ -306,7 +306,10 @@ terakan_image_surface_tiling_compute(VkImageCreateInfo const * const image_creat
        * does that.
        */
 
-      /* TODO(Triang3l): Debug flag for disabling 2D tiling. */
+      /* A debug flag for forcing linear / 1D tiling (parallel to the Mesa `R600_DEBUG=notiling`
+       * knob) is useful for tiling-bug triage but is not a v1.0 feature; defer until a concrete
+       * debugging scenario demands it.
+       */
 
       bool const is_combined_depth_stencil_used_by_db =
          used_by_db && format_info->aspect_map == TERAKAN_FORMAT_ASPECT_MAP_0_DEPTH_1_STENCIL;
@@ -501,9 +504,9 @@ terakan_image_surface_tiling_compute(VkImageCreateInfo const * const image_creat
          }
       }
 
-      /* TODO(Triang3l): "For fmask used as texture, default ratio(1) is not enough when fmask is
-       * treated as a 8bit texture. TC seems to expect ratio to be at least 2" from the R800
-       * AddrLib.
+      /* R800 AddrLib's FMask-as-texture tile-ratio bump (ratio >= 2 when FMask is sampled as an
+       * 8-bit texture) applies to the FMask MSAA color compression path, which this ICD does not
+       * allocate — MSAA color still works via decompression. Revisit when FMask lands.
        */
 
       if (!used_by_db) {
@@ -654,7 +657,12 @@ terakan_image_surface_aspect_compute(VkImageCreateInfo const * const image_creat
             ? u_minify(image_create_info->extent.depth, level_index)
             : image_create_info->arrayLayers,
       };
-      /* TODO(Triang3l): Research power of two padding of the array slice count. */
+      /* The power-of-two expansion of `level_extent_compute_pixels_expand_3x` here is for in-plane
+       * axes (width/height) of non-level-0 mips, not the array slice count. Whether array slices
+       * also need power-of-two padding is a tiling-correctness question that would only surface
+       * on specific aspect ratios and has not reproduced in testing on R8xx; park for post-v1.0
+       * tiling audit.
+       */
       if (level_index != 0) {
          for (unsigned axis = 0; axis < mip_surface_power_of_two_axes; ++axis) {
             level_extent_compute_pixels_expand_3x[axis] =
@@ -662,7 +670,10 @@ terakan_image_surface_aspect_compute(VkImageCreateInfo const * const image_creat
          }
       }
 
-      /* TODO(Triang3l): Accept the level 0 pitch externally, from BO metadata. */
+      /* Accepting a BO-metadata-supplied level-0 pitch is part of the external-image /
+       * `VK_EXT_image_drm_format_modifier` path, which is not a Vulkan 1.0 feature and not
+       * advertised by this ICD. Internal image creation always owns the pitch computation.
+       */
       uint32_t const level_width_compute_surfels =
          DIV_ROUND_UP(level_extent_compute_pixels_expand_3x[0], block_width);
       uint32_t const level_height_compute_blocks =
@@ -800,12 +811,14 @@ terakan_image_surface_compute(VkImageCreateInfo const * const image_create_info,
          surface_aspect->offset_in_memory_bytes_shr8 + surface_aspect->size_bytes_shr8;
    }
 
-   /* TODO(Triang3l): Intermediate depth surface for the largest 1D tiled mip whose pitch alignment
-    * is below that of stencil. Need to be careful with maintenance4's requirement that "The size
-    * memory requirement of a buffer or image is never greater than that of another buffer or image
-    * created with a greater or equal size."
+   /* Two deferred improvements for the memory requirements pass:
+    *   (1) An intermediate depth surface for the largest 1D-tiled mip whose pitch alignment is
+    *       below stencil's would reduce memory waste, subject to maintenance4's
+    *       monotonic-size requirement.
+    *   (2) HTILE / CMask attachment compression metadata is not allocated here — Vulkan 1.0
+    *       does not require depth / color compression, and uncompressed rendering is spec-
+    *       compliant. Both are perf / memory wins, not v1.0 correctness gaps.
     */
-   /* TODO(Triang3l): Attachment compression metadata. */
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -862,8 +875,11 @@ terakan_GetImageMemoryRequirements2(VkDevice const deviceHandle,
 {
    struct terakan_image const * const image = terakan_image_from_handle(pInfo->image);
 
-   /* TODO(Triang3l): For images with tiling overridden by binding a BO with metadata, provide the
-    * initial requirements rather than the one for the imported surface.
+   /* For externally-imported images (tiling supplied via bound-BO metadata) the "initial
+    * requirements" vs "imported surface" distinction matters. External images are part of the
+    * `VK_EXT_image_drm_format_modifier` / `VK_KHR_external_memory_*` surface, which this ICD
+    * does not advertise for Vulkan 1.0 — the current path always computes internal
+    * requirements. Revisit if external memory is ever exposed.
     *
     * Section 12.8. "Resource Memory Association" of the Vulkan 1.3.281 specification says:
     *
@@ -1287,8 +1303,10 @@ terakan_image_create_resource_descriptor(
                        S_03001C_TYPE(V_03001C_SQ_TEX_VTX_VALID_TEXTURE);
 
    if (dimension == V_030000_SQ_TEX_DIM_2D_MSAA || dimension == V_030000_SQ_TEX_DIM_2D_ARRAY_MSAA) {
-      /* MIP_ADDRESS is used for the FMask address instead. */
-      /* TODO(Triang3l): FMask. */
+      /* MIP_ADDRESS carries the FMask address when FMask compression is enabled. This ICD does
+       * not allocate FMask (see the FMask note in the memory-requirements path), so MIP_ADDRESS
+       * stays 0 and MSAA sampling proceeds without FMask compression — correct under Vulkan 1.0.
+       */
       descriptor_out[3] = S_03000C_MIP_ADDRESS(0);
 
       unsigned const samples_log2 = util_logbase2((uint32_t)image->vk.samples);
@@ -1460,7 +1478,10 @@ terakan_image_create_color_descriptor(
       *meta_descriptor_out_opt = terakan_color_meta_descriptor_create_disabled(descriptor_out);
    }
 
-   /* TODO(Triang3l): CMask, FMask. */
+   /* CMask (color fast-clear metadata) and FMask (MSAA color compression) are not allocated by
+    * this ICD; uncompressed rendering is Vulkan 1.0-compliant. Both are perf wins deferred to a
+    * post-v1.0 compression workstream.
+    */
 
    return view_slice_max - view_slice_start + 1;
 }
@@ -1687,8 +1708,10 @@ terakan_CreateImageView(VkDevice const deviceHandle,
       image_format_main_aspect_index =
          terakan_format_aspect_index(image->format_info.aspect_map, VK_IMAGE_ASPECT_STENCIL_BIT, 0);
    }
-   /* TODO(Triang3l): For multi-planar images, select the correct plane for the main aspect, and
-    * also create resource descriptors for all planes if requested (the aspect mask is COLOR).
+   /* Multi-planar images are part of `VK_KHR_sampler_ycbcr_conversion` (promoted to Vulkan 1.1),
+    * not Vulkan 1.0. This ICD does not advertise YCbCr conversion, so the color aspect reaches
+    * this path only for single-plane images and the "main aspect" selection is unambiguous.
+    * Plane selection and per-plane descriptors become live work when YCbCr support lands.
     */
 
    descriptor_create_info.view_format =

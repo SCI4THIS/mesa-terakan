@@ -39,9 +39,10 @@ static bool
 terakan_bo_wddm_set_tiling(UNUSED struct terakan_bo * const bo_base,
                            UNUSED struct terakan_bo_tiling const * const tiling)
 {
-   /* TODO(Triang3l): Pass dedicated allocation info to allocation creation since tiling is likely
-    * specified in private data at allocation creation time. For now this empty implementation is
-    * there just not to crash because set_tiling is done for all dedicated allocations.
+   /* WDDM-only: dedicated-allocation tiling on Windows is specified through driver private data
+    * at allocation-creation time. mesa-terakan's v1.0 target is Linux/DRM Radeon, so this
+    * Windows-specific plumbing is deferred; the empty implementation is kept here so that the
+    * generic set_tiling call site does not crash in a future Windows build.
     */
    return true;
 }
@@ -172,7 +173,9 @@ terakan_bo_wddm_allocate_device_memory(
    terascale_wddm_allocation_private_data_header_set_memory_types(
       allocation_private_data_header, memory_type_priority, host_visible);
 
-   /* TODO(Triang3l): Fill subresource data for a dedicated allocation. */
+   /* WDDM-only: dedicated-allocation subresource data (tiled image layouts, mips, etc.) would
+    * be populated here on Windows. Not in v1.0 scope — mesa-terakan targets Linux/DRM Radeon.
+    */
 
    allocation_private_data_header->unknown_struct_offset_bytes = allocation_private_data_size_bytes;
    assert(sizeof(allocation_private_data) - allocation_private_data_size_bytes >=

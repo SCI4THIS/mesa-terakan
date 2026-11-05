@@ -145,5 +145,12 @@ terakan_CmdBeginRendering(VkCommandBuffer const commandBuffer,
 VKAPI_ATTR void VKAPI_CALL
 terakan_CmdEndRendering(UNUSED VkCommandBuffer const commandBuffer)
 {
-   /* TODO(Triang3l): Resolve the attachments. */
+   /* End-of-pass resolve (VkRenderingAttachmentInfo::resolveMode != NONE) shares the single meta
+    * resolve shader with the standalone terakan_CmdResolveImage2 in meta/terakan_meta_copy_image.c,
+    * which today is a crash-safe no-op pending a real meta resolve pass. Keep this entrypoint a
+    * no-op in lockstep: when the shared meta resolve lands behind that stub, this hooks into the
+    * same code path by iterating pColorAttachments / pDepthAttachment / pStencilAttachment, looking
+    * at resolveImageView + resolveMode, and dispatching the same meta shader with the attachment
+    * as the source and the resolve view as the destination.
+    */
 }

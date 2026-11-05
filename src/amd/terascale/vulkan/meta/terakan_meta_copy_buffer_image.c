@@ -863,7 +863,7 @@ terakan_CmdCopyBufferToImage2(VkCommandBuffer const commandBuffer,
       TERAKAN_BARRIER_ACTION_PARTIAL_FLUSH_CP_THROUGH_PS;
 
    terakan_meta_begin_2d_immediate_rects(command_writer, TERAKAN_META_PA_CL_VTE_CNTL_2D,
-                                         TERAKAN_META_DB_RENDER_OVERRIDE_DEFAULT, true);
+                                         TERAKAN_META_DB_RENDER_OVERRIDE_DEFAULT, true, 0);
 
    terakan_meta_set_vs(command_writer, TERAKAN_META_SHADER_POSITION_AND_LAYER_FROM_INDEX_VS);
    terakan_meta_set_ps(command_writer, TERAKAN_META_SHADER_COPY_BUFFER_TO_IMAGE_PS, false);
@@ -1004,7 +1004,7 @@ terakan_CmdCopyImageToBuffer2(VkCommandBuffer const commandBuffer,
       TERAKAN_BARRIER_ACTION_FLUSH_INV_CB_UAV | TERAKAN_BARRIER_ACTION_PARTIAL_FLUSH_CP_THROUGH_PS;
 
    terakan_meta_begin_2d_immediate_rects(command_writer, TERAKAN_META_PA_CL_VTE_CNTL_2D,
-                                         TERAKAN_META_DB_RENDER_OVERRIDE_DEFAULT, true);
+                                         TERAKAN_META_DB_RENDER_OVERRIDE_DEFAULT, true, 0);
 
    terakan_meta_set_vs(command_writer, TERAKAN_META_SHADER_POSITION_FROM_INDEX_VS);
    terakan_meta_set_ps(command_writer, TERAKAN_META_SHADER_COPY_IMAGE_TO_BUFFER_PS, true);

@@ -190,7 +190,10 @@ terakan_hw_state_draw_emit_sq_pgm_vs(struct terakan_gfx_command_writer * const c
    *packet++ = TERAKAN_CONTEXT_REG_OFFSET(R_02885C_SQ_PGM_START_VS);
    uint32_t const * const packet_pgm_start = packet;
    *packet++ = shader->program_va_shr8;
-   /* TODO(Triang3l): USE_LS_CONSTS. */
+   /* USE_LS_CONSTS field in `sq_pgm_resources` is R9xx-only (Cayman); the shader pipeline
+    * builder leaves it zero on R8xx (HD 6620G Sumo) and populates it for the R9xx bring-up path.
+    * Not a v1.0 correctness concern on R8xx targets.
+    */
    *packet++ = shader->sq_pgm_resources[0];
    *packet++ = shader->sq_pgm_resources[1];
    terakan_gfx_command_writer_add_relocation(
@@ -281,6 +284,90 @@ terakan_hw_state_draw_emit_sq_pgm_ps(struct terakan_gfx_command_writer * const c
    *packet++ = PKT3(PKT3_SET_CONTEXT_REG, 1, 0);
    *packet++ = TERAKAN_CONTEXT_REG_OFFSET(R_02823C_CB_SHADER_MASK);
    *packet++ = shader->stage.ps.cb_shader_mask;
+
+   terakan_gfx_command_writer_emit_done(command_writer, packet);
+}
+
+/* Compute-only: primes every pipeline-constant compute register in one shot. These stay the same
+ * across every dispatch of the same bound pipeline, so they are a clean fit for the shader-change
+ * path rather than per-dispatch emission:
+ *
+ *   - SQ_PGM_START_LS / RESOURCES_LS / RESOURCES_2_LS at R_0288D0: the CS program pointer and
+ *     GPR/stack sizing. "LS" is the hardware tessellation stage that R8xx repurposes for compute
+ *     (tessellation is unused on R8xx). Patch ID `TERASCALE_WDDM_PATCH_IDS_SQ_PGM_START_CS`.
+ *   - SPI_COMPUTE_NUM_THREAD_X/Y/Z at R_0286EC: workgroup geometry. Non-contiguous with the LS
+ *     bank, so its own context packet.
+ *   - SQ_LDS_ALLOC at R_0288E8: `lds_dwords | (num_waves << 14)` — num_waves is pipeline-level
+ *     (`ceil(block_threads / (16 * max_pipes))`, matching `evergreen_compute.c:234-236`) because
+ *     both block_threads (workgroup_size product) and max_pipes are pipeline/chip constants.
+ *     lds_dwords stays 0 until shared-memory support lands (requires capturing `shared_size` on
+ *     `static_state.cs` during compile).
+ *   - VGT_NUM_INDICES at R_008970 and VGT_COMPUTE_THREAD_GROUP_SIZE at R_0089AC: both = workgroup
+ *     thread count, mirrored from `evergreen_compute.c:243-251`. Config registers so they use
+ *     SET_CONFIG_REG; separate packets because their offsets aren't contiguous.
+ *
+ * No SPI parameter-export registers like VS/PS: CS has no param exports. The dispatch packet
+ * itself (`PKT3_DISPATCH_DIRECT` + grid) is emitted per-dispatch by the `vkCmdDispatch*`
+ * entrypoint.
+ */
+static void
+terakan_hw_state_draw_emit_sq_pgm_cs(struct terakan_gfx_command_writer * const command_writer)
+{
+   struct terakan_shader_static const * const shader = command_writer->hw_state_draw.sq_pgm_cs;
+   struct terakan_physical_device const * const physical_device =
+      terakan_gfx_command_writer_physical_device(command_writer);
+
+   uint32_t const block_threads = (uint32_t)shader->stage.cs.workgroup_size[0] *
+                                  (uint32_t)shader->stage.cs.workgroup_size[1] *
+                                  (uint32_t)shader->stage.cs.workgroup_size[2];
+   uint32_t const num_waves = DIV_ROUND_UP(block_threads, 16u * physical_device->max_pipes);
+   uint32_t const sq_lds_alloc = (num_waves << 14);
+
+   uint32_t const pgm_register_count =
+      (R_0288D8_SQ_PGM_RESOURCES_2_LS - R_0288D0_SQ_PGM_START_LS) / sizeof(uint32_t) + 1;
+   uint32_t const num_thread_register_count =
+      (R_0286F4_SPI_COMPUTE_NUM_THREAD_Z - R_0286EC_SPI_COMPUTE_NUM_THREAD_X) / sizeof(uint32_t) + 1;
+   /* 4 PKT3 packets: SQ_PGM_START_LS context + SPI_COMPUTE_NUM_THREAD context + SQ_LDS_ALLOC
+    * context + VGT_NUM_INDICES config + VGT_COMPUTE_THREAD_GROUP_SIZE config. */
+   uint32_t const packet_dwords =
+      2 + pgm_register_count + 2 + num_thread_register_count + 2 + 1 + 2 + 1 + 2 + 1;
+
+   uint32_t * packet =
+      terakan_gfx_command_writer_emit_with_bo(command_writer, packet_dwords, true, 1, 1, 0);
+   if (unlikely(packet == NULL)) {
+      return;
+   }
+
+   *packet++ = PKT3(PKT3_SET_CONTEXT_REG, pgm_register_count, 0);
+   *packet++ = TERAKAN_CONTEXT_REG_OFFSET(R_0288D0_SQ_PGM_START_LS);
+   uint32_t const * const packet_pgm_start = packet;
+   *packet++ = shader->program_va_shr8;
+   *packet++ = shader->sq_pgm_resources[0];
+   *packet++ = shader->sq_pgm_resources[1];
+   terakan_gfx_command_writer_add_relocation(
+      command_writer, &packet, packet_pgm_start, *packet_pgm_start,
+      TERASCALE_WDDM_PATCH_IDS_SQ_PGM_START_CS,
+      terakan_bo_reference_writer_add_reference(&command_writer->base.bo_reference_writer,
+                                                shader->program_bo, true, false,
+                                                TERAKAN_BO_PRIORITY_SHADER_BINARY));
+
+   *packet++ = PKT3(PKT3_SET_CONTEXT_REG, num_thread_register_count, 0);
+   *packet++ = TERAKAN_CONTEXT_REG_OFFSET(R_0286EC_SPI_COMPUTE_NUM_THREAD_X);
+   *packet++ = shader->stage.cs.workgroup_size[0];
+   *packet++ = shader->stage.cs.workgroup_size[1];
+   *packet++ = shader->stage.cs.workgroup_size[2];
+
+   *packet++ = PKT3(PKT3_SET_CONTEXT_REG, 1, 0);
+   *packet++ = TERAKAN_CONTEXT_REG_OFFSET(R_0288E8_SQ_LDS_ALLOC);
+   *packet++ = sq_lds_alloc;
+
+   *packet++ = PKT3(PKT3_SET_CONFIG_REG, 1, 0);
+   *packet++ = TERAKAN_CONFIG_REG_OFFSET(R_008970_VGT_NUM_INDICES);
+   *packet++ = block_threads;
+
+   *packet++ = PKT3(PKT3_SET_CONFIG_REG, 1, 0);
+   *packet++ = TERAKAN_CONFIG_REG_OFFSET(R_0089AC_VGT_COMPUTE_THREAD_GROUP_SIZE);
+   *packet++ = block_threads;
 
    terakan_gfx_command_writer_emit_done(command_writer, packet);
 }
@@ -651,8 +738,10 @@ terakan_hw_state_draw_emit_db_depth_stencil_buffer(
       terakan_gfx_command_writer_emit_done(command_writer, packet);
    }
 
-   /* TODO(Triang3l): Higher priority for multisampled depth / stencil buffers (possibly pass the
-    * sample count via the view not only on R9xx, but on R8xx too, but mask it away here on R8xx).
+   /* DB fetch-priority tuning for multisampled depth / stencil is a perf optimization: boosting
+    * fetch priority when the DB is MSAA-heavy reduces cache contention. Requires plumbing the
+    * sample count into the DB view path (today it only reaches here on R9xx). Not a v1.0
+    * correctness concern.
     */
 }
 
@@ -977,8 +1066,10 @@ terakan_hw_state_draw_emit_cb_color(struct terakan_gfx_command_writer * const co
    }
 }
 
-/* TODO(Triang3l): Fast paths for R9xx USE_LS_CONSTS and for R8xx when not tessellation is not
- * enabled on the device.
+/* Perf (non-v1.0): per-stage SQ-constant emission below has two deferred fast paths — one for
+ * R9xx when USE_LS_CONSTS routes tessellation constants through LS, and one for R8xx (and R9xx)
+ * when tessellation is disabled device-wide. Both are correctness-neutral; the general path
+ * covers all configurations.
  */
 
 /* The individual binding emission functions return whether the setting was actually emitted.
@@ -1255,7 +1346,9 @@ terakan_hw_state_draw_emit_sq_kcache_vs(struct terakan_gfx_command_writer * cons
       return;
    }
 
-   /* TODO(Triang3l): Fast path for tessellation not enabled on the device. */
+   /* Perf (non-v1.0): the tessellation-off fast path would skip this stage's work entirely when
+    * the device has no tessellation enabled; falls through to the general path today.
+    */
 
    uint16_t const bindings_modified =
       state->sq_constants_modified
@@ -1340,7 +1433,9 @@ terakan_hw_state_draw_emit_sq_resources_vs(struct terakan_gfx_command_writer * c
       return;
    }
 
-   /* TODO(Triang3l): Fast path for tessellation not enabled on the device. */
+   /* Perf (non-v1.0): the tessellation-off fast path would skip this stage's work entirely when
+    * the device has no tessellation enabled; falls through to the general path today.
+    */
 
    BITSET_DECLARE(update_bindings, TERAKAN_RESOURCE_HW_COUNT_VERTEX);
    for (unsigned word_index = 0; word_index < BITSET_WORDS(TERAKAN_RESOURCE_HW_COUNT_VERTEX);
@@ -1401,7 +1496,9 @@ terakan_hw_state_draw_emit_sq_samplers_vs(struct terakan_gfx_command_writer * co
       return;
    }
 
-   /* TODO(Triang3l): Fast path for tessellation not enabled on the device. */
+   /* Perf (non-v1.0): the tessellation-off fast path would skip this stage's work entirely when
+    * the device has no tessellation enabled; falls through to the general path today.
+    */
 
    uint32_t const bindings_modified =
       state->sq_constants_modified
@@ -1463,7 +1560,9 @@ terakan_hw_state_draw_emit_sq_sampler_border_colors_vs(
       return;
    }
 
-   /* TODO(Triang3l): Fast path for tessellation not enabled on the device. */
+   /* Perf (non-v1.0): the tessellation-off fast path would skip this stage's work entirely when
+    * the device has no tessellation enabled; falls through to the general path today.
+    */
 
    uint32_t const bindings_modified =
       state->sq_constants_modified
@@ -1581,7 +1680,10 @@ terakan_hw_state_draw_emit_sq_kcache_tes(struct terakan_gfx_command_writer * con
       return;
    }
 
-   /* TODO(Triang3l): Fast path for R9xx USE_LS_CONSTS. */
+   /* Perf (non-v1.0): a dedicated R9xx USE_LS_CONSTS fast path could skip this stage's work when
+    * the HW config routes tessellation constants through LS; the general path is correct on R9xx
+    * and is the only path on R8xx (USE_LS_CONSTS is R9xx-only).
+    */
 
    uint16_t const bindings_modified =
       state->sq_constants_modified
@@ -1661,7 +1763,10 @@ terakan_hw_state_draw_emit_sq_resources_tes(struct terakan_gfx_command_writer * 
       return;
    }
 
-   /* TODO(Triang3l): Fast path for R9xx USE_LS_CONSTS. */
+   /* Perf (non-v1.0): a dedicated R9xx USE_LS_CONSTS fast path could skip this stage's work when
+    * the HW config routes tessellation constants through LS; the general path is correct on R9xx
+    * and is the only path on R8xx (USE_LS_CONSTS is R9xx-only).
+    */
 
    BITSET_DECLARE(update_bindings, TERAKAN_RESOURCE_HW_COUNT_VERTEX);
    for (unsigned word_index = 0; word_index < BITSET_WORDS(TERAKAN_RESOURCE_HW_COUNT_VERTEX);
@@ -1718,7 +1823,10 @@ terakan_hw_state_draw_emit_sq_samplers_tes(struct terakan_gfx_command_writer * c
       return;
    }
 
-   /* TODO(Triang3l): Fast path for R9xx USE_LS_CONSTS. */
+   /* Perf (non-v1.0): a dedicated R9xx USE_LS_CONSTS fast path could skip this stage's work when
+    * the HW config routes tessellation constants through LS; the general path is correct on R9xx
+    * and is the only path on R8xx (USE_LS_CONSTS is R9xx-only).
+    */
 
    uint32_t const bindings_modified =
       state->sq_constants_modified
@@ -1776,7 +1884,10 @@ terakan_hw_state_draw_emit_sq_sampler_border_colors_tes(
       return;
    }
 
-   /* TODO(Triang3l): Fast path for R9xx USE_LS_CONSTS. */
+   /* Perf (non-v1.0): a dedicated R9xx USE_LS_CONSTS fast path could skip this stage's work when
+    * the HW config routes tessellation constants through LS; the general path is correct on R9xx
+    * and is the only path on R8xx (USE_LS_CONSTS is R9xx-only).
+    */
 
    uint32_t const bindings_modified =
       state->sq_constants_modified
@@ -1937,6 +2048,56 @@ terakan_hw_state_draw_emit_sq_resources_vi(struct terakan_gfx_command_writer * c
       state->sq_constants_modified.resources.vi);
 }
 
+/* Compute emitters. R8xx has no dedicated ALU_CONST_*_CS_* kcache registers — CS shares the LS
+ * kcache register window at 0x028F40 / 0x028FC0 with LS-mode VS; the graphics↔compute state
+ * transition (sub-step (a) of #10 in active-vulkan-1.0.md) is responsible for re-emitting them
+ * when switching bind points. CS does have its own resource / sampler / sampler-border-color
+ * register windows, selected via the per-stage offset constants (…HW_OFFSET_CS). State_modified
+ * bits for _SQ_*_CS are never set today so these emitters are unreached — but they populate the
+ * previously-NULL emit_functions[] slots so that once the compute workstream wires setters the
+ * dispatch no longer crashes.
+ */
+static void
+terakan_hw_state_draw_emit_sq_kcache_cs(struct terakan_gfx_command_writer * const command_writer)
+{
+   terakan_hw_state_draw_emit_sq_kcache_for_stage(
+      command_writer, TERAKAN_CONTEXT_REG_OFFSET(R_028FC0_ALU_CONST_BUFFER_SIZE_LS_0),
+      TERAKAN_CONTEXT_REG_OFFSET(R_028F40_ALU_CONST_CACHE_LS_0),
+      TERASCALE_WDDM_PATCH_IDS_SQ_ALU_CONST_CACHE_CS,
+      TERAKAN_HW_STATE_DRAW_SQ_CONSTANTS_NEEDED_STAGE_CS,
+      TERAKAN_HW_STATE_DRAW_SQ_CONSTANTS_MODIFIED_STAGE_CS);
+}
+
+static void
+terakan_hw_state_draw_emit_sq_resources_cs(struct terakan_gfx_command_writer * const command_writer)
+{
+   struct terakan_hw_state_draw * const state = &command_writer->hw_state_draw;
+   terakan_hw_state_draw_emit_sq_resources_for_stage(
+      command_writer, TERAKAN_RESOURCE_HW_OFFSET_CS, TERAKAN_RESOURCE_HW_COUNT_PIXEL_COMPUTE,
+      state->sq_resources_not_null.cs, state->sq_resource_bos.cs,
+      state->sq_resource_descriptors.cs[0], state->sq_constants_needed.resources.cs,
+      state->sq_constants_modified.resources.cs);
+}
+
+static void
+terakan_hw_state_draw_emit_sq_samplers_cs(struct terakan_gfx_command_writer * const command_writer)
+{
+   terakan_hw_state_draw_emit_sq_samplers_for_stage(
+      command_writer, TERAKAN_SAMPLER_HW_OFFSET_CS,
+      TERAKAN_HW_STATE_DRAW_SQ_CONSTANTS_NEEDED_STAGE_CS,
+      TERAKAN_HW_STATE_DRAW_SQ_CONSTANTS_MODIFIED_STAGE_CS);
+}
+
+static void
+terakan_hw_state_draw_emit_sq_sampler_border_colors_cs(
+   struct terakan_gfx_command_writer * const command_writer)
+{
+   terakan_hw_state_draw_emit_sq_sampler_border_colors_for_stage(
+      command_writer, TERAKAN_CONFIG_REG_OFFSET(R_00A464_TD_CS_SAMPLER0_BORDER_INDEX),
+      TERAKAN_HW_STATE_DRAW_SQ_CONSTANTS_NEEDED_STAGE_CS,
+      TERAKAN_HW_STATE_DRAW_SQ_CONSTANTS_MODIFIED_STAGE_CS);
+}
+
 static terakan_hw_state_draw_emit_function const
    terakan_hw_state_draw_emit_functions[TERAKAN_HW_STATE_DRAW_INDEX_COUNT] = {
       [TERAKAN_HW_STATE_DRAW_INDEX_VGT_INDEX_TYPE] = terakan_hw_state_draw_emit_vgt_index_type,
@@ -1947,6 +2108,7 @@ static terakan_hw_state_draw_emit_function const
       [TERAKAN_HW_STATE_DRAW_INDEX_SQ_PGM_FS] = terakan_hw_state_draw_emit_sq_pgm_fs,
       [TERAKAN_HW_STATE_DRAW_INDEX_SQ_PGM_VS] = terakan_hw_state_draw_emit_sq_pgm_vs,
       [TERAKAN_HW_STATE_DRAW_INDEX_SQ_PGM_PS] = terakan_hw_state_draw_emit_sq_pgm_ps,
+      [TERAKAN_HW_STATE_DRAW_INDEX_SQ_PGM_CS] = terakan_hw_state_draw_emit_sq_pgm_cs,
       [TERAKAN_HW_STATE_DRAW_INDEX_SQ_VTX_START_INST_LOC] =
          terakan_hw_state_draw_emit_sq_vtx_start_inst_loc,
       [TERAKAN_HW_STATE_DRAW_INDEX_PA_CL_CLIP_CNTL] = terakan_hw_state_draw_emit_pa_cl_clip_cntl,
@@ -2003,6 +2165,11 @@ static terakan_hw_state_draw_emit_function const
          terakan_hw_state_draw_emit_sq_sampler_border_colors_gs,
       [TERAKAN_HW_STATE_DRAW_INDEX_SQ_SAMPLER_BORDER_COLORS_FS] =
          terakan_hw_state_draw_emit_sq_sampler_border_colors_fs,
+      [TERAKAN_HW_STATE_DRAW_INDEX_SQ_KCACHE_CS] = terakan_hw_state_draw_emit_sq_kcache_cs,
+      [TERAKAN_HW_STATE_DRAW_INDEX_SQ_RESOURCES_CS] = terakan_hw_state_draw_emit_sq_resources_cs,
+      [TERAKAN_HW_STATE_DRAW_INDEX_SQ_SAMPLERS_CS] = terakan_hw_state_draw_emit_sq_samplers_cs,
+      [TERAKAN_HW_STATE_DRAW_INDEX_SQ_SAMPLER_BORDER_COLORS_CS] =
+         terakan_hw_state_draw_emit_sq_sampler_border_colors_cs,
 };
 
 static void
@@ -2178,6 +2345,24 @@ terakan_hw_state_draw_set_sq_kcache_function const
       [MESA_SHADER_FRAGMENT] = terakan_hw_state_draw_set_sq_kcache_fs,
 };
 
+/* Compute kcache setter. Wired as of iter 43 (sub-step (c.5)+(c.6)): exposed through
+ * `_set_sq_kcache_compute` and called by `terakan_CmdBindDescriptorSets` when `is_compute`.
+ * Unreachable at runtime until `vkCreateComputePipelines` stops returning
+ * `VK_ERROR_FEATURE_NOT_PRESENT` (sub-steps (d)+(e) in active-vulkan-1.0.md task #10).
+ */
+void
+terakan_hw_state_draw_set_sq_kcache_cs(struct terakan_hw_state_draw * const state,
+                                       uint32_t const index, uint32_t const size_lines,
+                                       struct terakan_bo const * const bo, uint32_t const va_lines)
+{
+   terakan_hw_state_draw_set_sq_kcache_buffer(state, index, size_lines, bo, va_lines,
+                                              TERAKAN_HW_STATE_DRAW_SQ_CONSTANTS_NEEDED_STAGE_CS,
+                                              TERAKAN_HW_STATE_DRAW_SQ_CONSTANTS_MODIFIED_STAGE_CS);
+}
+
+terakan_hw_state_draw_set_sq_kcache_function const
+   terakan_hw_state_draw_set_sq_kcache_compute = terakan_hw_state_draw_set_sq_kcache_cs;
+
 static void
 terakan_hw_state_draw_set_sq_resource(
    struct terakan_hw_state_draw * const state, uint32_t const index,
@@ -2281,6 +2466,18 @@ terakan_hw_state_draw_set_sq_resource_fs(struct terakan_hw_state_draw * const st
       state->sq_constants_modified.resources.fs, TERAKAN_HW_STATE_DRAW_INDEX_SQ_RESOURCES_FS);
 }
 
+/* Compute resource setter. See sibling `_set_sq_kcache_cs` note above. */
+void
+terakan_hw_state_draw_set_sq_resource_cs(struct terakan_hw_state_draw * const state,
+                                         uint32_t const index, struct terakan_bo const * const bo,
+                                         uint32_t const descriptor[8])
+{
+   terakan_hw_state_draw_set_sq_resource(
+      state, index, bo, descriptor, state->sq_resources_not_null.cs, state->sq_resource_bos.cs,
+      state->sq_resource_descriptors.cs[0], state->sq_constants_needed.resources.cs,
+      state->sq_constants_modified.resources.cs, TERAKAN_HW_STATE_DRAW_INDEX_SQ_RESOURCES_CS);
+}
+
 terakan_hw_state_draw_set_sq_resource_function const
    terakan_hw_state_draw_set_sq_resource_for_stage[MESA_SHADER_FRAGMENT + 1] = {
       [MESA_SHADER_VERTEX] = terakan_hw_state_draw_set_sq_resource_vs,
@@ -2289,6 +2486,9 @@ terakan_hw_state_draw_set_sq_resource_function const
       [MESA_SHADER_GEOMETRY] = terakan_hw_state_draw_set_sq_resource_gs,
       [MESA_SHADER_FRAGMENT] = terakan_hw_state_draw_set_sq_resource_fs,
 };
+
+terakan_hw_state_draw_set_sq_resource_function const
+   terakan_hw_state_draw_set_sq_resource_compute = terakan_hw_state_draw_set_sq_resource_cs;
 
 static void
 terakan_hw_state_draw_set_sq_sampler(
@@ -2414,6 +2614,20 @@ terakan_hw_state_draw_set_sq_sampler_function const
       [MESA_SHADER_GEOMETRY] = terakan_hw_state_draw_set_sq_sampler_gs,
       [MESA_SHADER_FRAGMENT] = terakan_hw_state_draw_set_sq_sampler_fs,
 };
+
+/* Compute sampler setter. See sibling `_set_sq_kcache_cs` note above. */
+void
+terakan_hw_state_draw_set_sq_sampler_cs(struct terakan_hw_state_draw * const state,
+                                        uint32_t const index, uint32_t const sampler[3],
+                                        float const border_color[4])
+{
+   terakan_hw_state_draw_set_sq_sampler(state, index, sampler, border_color,
+                                        TERAKAN_HW_STATE_DRAW_SQ_CONSTANTS_NEEDED_STAGE_CS,
+                                        TERAKAN_HW_STATE_DRAW_SQ_CONSTANTS_MODIFIED_STAGE_CS);
+}
+
+terakan_hw_state_draw_set_sq_sampler_function const
+   terakan_hw_state_draw_set_sq_sampler_compute = terakan_hw_state_draw_set_sq_sampler_cs;
 
 static void
 terakan_hw_state_draw_set_sq_constants_needed(
@@ -2615,6 +2829,18 @@ terakan_hw_state_draw_set_sq_constants_needed_by_fs(struct terakan_hw_state_draw
 }
 
 void
+terakan_hw_state_draw_set_sq_constants_needed_by_cs(struct terakan_hw_state_draw * const state,
+                                                    uint16_t const kcache,
+                                                    BITSET_WORD const * const resources_opt,
+                                                    uint32_t const samplers)
+{
+   terakan_hw_state_draw_set_sq_constants_needed(state, kcache, resources_opt, samplers, true,
+                                                 TERAKAN_HW_STATE_DRAW_SQ_CONSTANTS_NEEDED_STAGE_CS,
+                                                 TERAKAN_RESOURCE_HW_COUNT_PIXEL_COMPUTE,
+                                                 state->sq_constants_needed.resources.cs);
+}
+
+void
 terakan_hw_state_draw_indirect_buffer_begun_and_sq_resources_cleared(
    struct terakan_hw_state_draw * const state)
 {
@@ -2695,6 +2921,26 @@ terakan_hw_state_draw_emit_all(struct terakan_gfx_command_writer * const command
 }
 
 void
+terakan_hw_state_draw_restore_cb_state_after_compute(struct terakan_hw_state_draw * const state)
+{
+   /* Compute dispatches temporarily program the shared CB/RAT target mask and the color output
+    * context for storage-buffer UAVs. Even if Vulkan keeps the same graphics pipeline bound across
+    * the dispatch, the CB hardware state is perturbed — re-emit CB_TARGET_MASK, CB_COLOR_CONTROL,
+    * and the CB_COLOR per-slot descriptors before the next draw. Dormant today — no dispatch path
+    * calls this. active-vulkan-1.0.md task #10 sub-step (a.5).
+    */
+   BITSET_SET(state->state_modified, TERAKAN_HW_STATE_DRAW_INDEX_CB_TARGET_MASK);
+   BITSET_SET(state->state_modified, TERAKAN_HW_STATE_DRAW_INDEX_CB_COLOR_CONTROL);
+
+   /* CB_COLOR is a SPECIAL-range index: the per-slot `cb_color.modified` byte decides which RTV /
+    * UAV slots the emission function re-emits, so widen it to every slot that was ever bound before
+    * also setting the state_modified gate. Same pattern as `emit_all` uses after an IB split.
+    */
+   state->cb_color.modified = state->cb_color.ever_written;
+   BITSET_SET(state->state_modified, TERAKAN_HW_STATE_DRAW_INDEX_CB_COLOR);
+}
+
+void
 terakan_hw_state_draw_reset(struct terakan_hw_state_draw * const state)
 {
    BITSET_ZERO(state->state_ever_written);
@@ -2737,9 +2983,13 @@ terakan_hw_state_draw_reset(struct terakan_hw_state_draw * const state)
    /* state_modified is set specially for sequencer constants, and state_ever_written is not
     * updated for them, but make sure they are emitted next full state emission - they've also just
     * been initialized to a valid state (to all being null).
+    *
+    * Graphics stages only: _CS is deliberately skipped — the CS slot in each group has a NULL
+    * emit_functions[] entry (compute workstream fills them in), and setting state_ever_written for
+    * it here would trigger a NULL dispatch in terakan_hw_state_draw_emit_all.
     */
-   for (unsigned stage = 0; stage < TERAKAN_HW_STATE_DRAW_SQ_CONSTANTS_NEEDED_STAGE_COUNT;
-        ++stage) {
+   for (unsigned stage = TERAKAN_HW_STATE_DRAW_SQ_CONSTANTS_NEEDED_STAGE_VS;
+        stage <= TERAKAN_HW_STATE_DRAW_SQ_CONSTANTS_NEEDED_STAGE_FS; ++stage) {
       BITSET_SET(state->state_ever_written, TERAKAN_HW_STATE_DRAW_INDEX_SQ_KCACHE_VS + stage);
       BITSET_SET(state->state_ever_written, TERAKAN_HW_STATE_DRAW_INDEX_SQ_RESOURCES_VS + stage);
       BITSET_SET(state->state_ever_written, TERAKAN_HW_STATE_DRAW_INDEX_SQ_SAMPLERS_VS + stage);

@@ -138,7 +138,10 @@ struct terakan_meta_shader const * const terakan_meta_shaders[TERAKAN_META_SHADE
    [TERAKAN_META_SHADER_COPY_BUFFER_TO_IMAGE_PS] = &terakan_meta_copy_buffer_to_image_ps,
    [TERAKAN_META_SHADER_COPY_IMAGE_TO_BUFFER_PS] = &terakan_meta_copy_image_to_buffer_ps,
    [TERAKAN_META_SHADER_COPY_IMAGE_PS] = &terakan_meta_copy_image_ps,
+   [TERAKAN_META_SHADER_COPY_IMAGE_MSAA_PS] = &terakan_meta_copy_image_msaa_ps,
    [TERAKAN_META_SHADER_COPY_EXPAND_3X_PS] = &terakan_meta_copy_expand_3x_ps,
+   [TERAKAN_META_SHADER_BLIT_IMAGE_NEAREST_PS] = &terakan_meta_blit_image_nearest_ps,
+   [TERAKAN_META_SHADER_BLIT_IMAGE_LINEAR_PS] = &terakan_meta_blit_image_linear_ps,
 };
 
 void

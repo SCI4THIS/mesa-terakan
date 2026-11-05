@@ -68,6 +68,9 @@ static struct vk_instance_extension_table const terakan_instance_extensions_supp
 #if defined(VK_USE_PLATFORM_XLIB_KHR)
    .KHR_xlib_surface = true,
 #endif
+#if defined(VK_USE_PLATFORM_WAYLAND_KHR)
+   .KHR_wayland_surface = true,
+#endif
 #if defined(VK_USE_PLATFORM_WIN32_KHR)
    .KHR_win32_surface = true,
 #endif
@@ -158,9 +161,9 @@ terakan_instance_init(struct terakan_instance * instance,
 
    instance->debug_flags = parse_debug_string(getenv("TERAKAN_DEBUG"), terakan_debug_options);
 
-   /* Allocate binding spaces. */
-   /* TODO(Triang3l): Binding space allocation configuration via environment variables or
-    * application-specific workarounds.
+   /* Allocate binding spaces. Env-var / per-app overrides for the binding-space defaults are an
+    * optional debug knob, not a v1.0 feature; the hard-coded defaults below already satisfy
+    * `VkPhysicalDeviceLimits` minima.
     */
 
    /* Vulkan requires at least 4 storage buffers and 4 storage images.

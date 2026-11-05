@@ -120,8 +120,9 @@ terakan_device_drm_radeon_create(struct terakan_physical_device * const physical
       goto fail_shared_bo_mutex;
    }
 
-   /* TODO(Triang3l): With virtual memory, query RADEON_INFO_IB_VM_MAX_SIZE for the maximum indirect
-    * buffer size in dwords.
+   /* The DRM Radeon kernel path on HD 6620G Sumo (and all mesa-terakan target chips) does not
+    * enable virtual memory, so RADEON_INFO_IB_VM_MAX_SIZE does not apply; the IB size is bounded
+    * by UINT32_MAX dwords in the non-VM path. Revisit if VM support is ever added to this winsys.
     */
    terakan_queue_submission_context_init(
       &device->gfx_submission_context.base,

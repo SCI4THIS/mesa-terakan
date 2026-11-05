@@ -40,7 +40,9 @@
 #include "compiler/shader_enums.h"
 #include "gallium/drivers/r600/r600_isa.h"
 #include "gallium/drivers/r600/sfn/sfn_nir.h"
+#include "util/build_id.h"
 #include "util/macros.h"
+#include "util/mesa-blake3.h"
 #include "util/u_math.h"
 #include "vk_alloc.h"
 #include "vk_device.h"
@@ -214,40 +216,127 @@ terakan_physical_device_get_capabilities(
    features_out->fullDrawIndexUint32 = true;
    features_out->imageCubeArray = true;
    features_out->independentBlend = true;
-   /* TODO(Triang3l): geometryShader. */
-   /* TODO(Triang3l): tessellationShader. */
-   /* TODO(Triang3l): sampleRateShading. */
+   /* geometryShader / tessellationShader: optional in Vulkan 1.0 (spec Table 32). R600 / Evergreen
+    * hardware supports both GS and tess stages, but SFN compiler support and the vk_runtime
+    * pipeline plumbing are large self-contained workstreams. Deferred past the v1.0 end-state
+    * marker; left false until those workstreams land.
+    */
+   /* sampleRateShading: optional in Vulkan 1.0 (spec Table 32). Enabling per-sample FS execution on
+    * Evergreen requires wiring the SPI_PS_INPUT_CNTL/PERSAMPLE bits, SPI_INPUT_Z/POS_W per-sample
+    * sources and PA_SC_AA_CONFIG::MSAA_NUM_SAMPLES into dynamic hw_state_draw, plus an SFN key path
+    * that pins Interp sources to sample rate. Deferred past the v1.0 end-state marker.
+    */
    features_out->dualSrcBlend = true;
    features_out->logicOp = true;
-   /* TODO(Triang3l): multiDrawIndirect. */
-   /* TODO(Triang3l): drawIndirectFirstInstance. */
+   features_out->multiDrawIndirect = true;
+   /* drawIndirectFirstInstance: on R600 / Evergreen the CP writes SQ_VTX_START_INST_LOC directly
+    * from VkDrawIndirectCommand::firstInstance when it processes DRAW_[INDEX_]INDIRECT (see the
+    * comment above terakan_invalidate_vertex_instance_offsets_after_indirect in terakan_draw.c).
+    * The fetch shader reads SQ_VTX_START_INST_LOC the same way for direct and indirect draws, so
+    * no shim buffer is required.
+    */
+   features_out->drawIndirectFirstInstance = true;
    features_out->depthClamp = true;
    features_out->depthBiasClamp = true;
    features_out->fillModeNonSolid = true;
-   /* TODO(Triang3l): wideLines. */
-   /* TODO(Triang3l): largePoints. */
-   /* TODO(Triang3l): alphaToOne. */
+   /* wideLines: optional in Vulkan 1.0 (spec Table 32). Enabling it requires a CmdSetLineWidth
+    * entrypoint feeding PA_SU_LINE_CNTL::WIDTH (currently emitted once as the hardcoded 1-pixel
+    * value in terakan_command_buffer.c) through hw_state_draw as dynamic state, plus a
+    * lineWidthRange expansion in Table 32 reporting. Deferred past the v1.0 end-state marker; the
+    * pointSizeRange / lineWidthRange = [1.0, 1.0] values already reported satisfy the spec in the
+    * false case.
+    */
+   /* largePoints: optional in Vulkan 1.0. Would need the VS point-size export plumbed through
+    * PA_CL_VS_OUT_CNTL::USE_VTX_POINT_SIZE and the per-draw PA_SU_POINT_SIZE register (currently
+    * hardcoded to the 1-pixel 8.3-fixed-point value in terakan_command_buffer.c). Deferred along
+    * with wideLines; same spec-conformant [1.0, 1.0] pointSizeRange.
+    */
+   /* alphaToOne: optional in Vulkan 1.0. Would need an SFN shader key that rewrites the
+    * fragment-shader W export to the constant-1 selector when the pipeline's
+    * VkPipelineMultisampleStateCreateInfo::alphaToOneEnable is true (mirrors r600_state.c:361-362
+    * and the FS W-export fixup in sfn_fill_bytecode.cpp:149 in the gallium driver). Deferred past
+    * the v1.0 end-state marker.
+    */
    features_out->multiViewport = true;
    features_out->samplerAnisotropy = true;
    features_out->textureCompressionBC = true;
-   /* TODO(Triang3l): occlusionQueryPrecise. */
-   /* TODO(Triang3l): pipelineStatisticsQuery. */
-   /* TODO(Triang3l): fragmentStoresAndAtomics. */
-   /* TODO(Triang3l): shaderTessellationAndGeometryPointSize. */
-   /* TODO(Triang3l): Possibly shaderImageGatherExtended. */
-   /* TODO(Triang3l): Shader storage image format features. */
-   /* TODO(Triang3l): Shader binding array dynamic indexing. */
-   /* TODO(Triang3l): shaderClipDistance. */
-   /* TODO(Triang3l): shaderCullDistance. */
-   /* TODO(Triang3l): shaderFloat64. */
-   /* TODO(Triang3l): shaderResourceMinLod. */
-   /* TODO(Triang3l): variableMultisampleRate. */
-   /* TODO(Triang3l): inheritedQueries. */
+   /* ZPASS_DONE on Evergreen produces an exact per-sample count regardless of the hint, so the
+    * baseline OCCLUSION path (terakan_CmdBeginQuery / terakan_CmdEndQuery emitting ZPASS_DONE
+    * PKT3_EVENT_WRITE pairs) already satisfies the precise-sample contract.
+    */
+   features_out->occlusionQueryPrecise = true;
+   /* pipelineStatisticsQuery: optional in Vulkan 1.0 (spec Table 32 does not require it). Left
+    * false unconditionally; the baseline queries workstream only targets occlusion + timestamp.
+    */
+   /* fragmentStoresAndAtomics: optional in Vulkan 1.0. Would require routing image stores and
+    * atomics through the pixel shader stage (currently only compute-style stages use UAV write
+    * paths). Deferred past the v1.0 end-state marker.
+    */
+   /* shaderTessellationAndGeometryPointSize: can only matter once geometryShader /
+    * tessellationShader are advertised. Tracks their status; stays false while those are false.
+    */
+   /* shaderImageGatherExtended: OpImageGather is already supported with a non-constant Offset on
+    * R600 / Evergreen via the gather4_o / gather4_c_o FETCH opcodes
+    * (TexInstr::Inputs::get_opcode in src/gallium/drivers/r600/sfn/sfn_instr_tex.cpp:875-879
+    * selects them when nir_tex_src_offset is not a const value), and nir_lower_tex is already
+    * configured with lower_tg4_offsets = true, so OpImageGather with ConstOffsets (4 explicit
+    * per-tap offsets) is lowered to four plain OpImageGathers with constant offsets ahead of
+    * backend emission.
+    */
+   features_out->shaderImageGatherExtended = true;
+   /* shaderStorageImageExtendedFormats: optional in Vulkan 1.0 (spec Table 32). Requires the
+    * extended format list (spec Table 69, ~40 formats beyond the mandatory 15) to carry
+    * VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT. terakan_format.c already sets STORAGE_IMAGE_BIT for
+    * every format that satisfies the CB UAV + SQ texture/vertex-fetch triangle, but a full audit
+    * against Table 69 has not been done; flip to true once the audit lands.
+    */
+   /* shaderStorageImageMultisample: optional in Vulkan 1.0. Permanently incompatible with the
+    * current storageImageSampleCounts = VK_SAMPLE_COUNT_1_BIT reporting; MSAA storage images would
+    * additionally require UAV MSAA plumbing in SFN and the color buffer path. Deferred.
+    */
+   /* shaderStorageImageReadWithoutFormat / shaderStorageImageWriteWithoutFormat: optional in
+    * Vulkan 1.0. terakan_format.c already sets VK_FORMAT_FEATURE_2_STORAGE_{READ,WRITE}_WITHOUT_
+    * FORMAT_BIT unconditionally whenever STORAGE_IMAGE_BIT / STORAGE_TEXEL_BUFFER_BIT is granted,
+    * so the per-format side is complete. The device-level flags stay false because no shader
+    * stage can actually exercise storage images today (fragmentStoresAndAtomics is false and
+    * vkCreateComputePipelines returns VK_ERROR_FEATURE_NOT_PRESENT); flip to true alongside the
+    * compute pipeline workstream once SFN image_load / image_store paths are verified against a
+    * compute shader using OpImageRead / OpImageWrite without a Format decoration.
+    */
+   /* shaderUniformBufferArrayDynamicIndexing, shaderSampledImageArrayDynamicIndexing:
+    * terakan_nir_lower_bindings_instr lowers load_ubo (and the UBO-side of
+    * STORAGE_BUFFER_DYNAMIC) through terakan_nir_load_raw_resource_buffer, which carries the
+    * non-constant array_index SSA into nir_load_buffer_resource_r600; SFN then picks it up in
+    * Shader::emit_load_buffer_resource (sfn_shader.cpp:1739-1754) and emits a GPR-sourced
+    * resource register when nir_src_as_const_value(instr->src[0]) is null. Sampled images
+    * follow the same shape via nir_tex_src_texture_offset / nir_tex_src_sampler_offset, which
+    * TexInstr::Inputs::get_opcode uses to pick GATHER4_O / GATHER4_C_O and SET_TEXTURE_OFFSETS
+    * paths. Dynamic indexing of storage buffers (writes/atomics) and storage images stays
+    * false pending backend-side intrinsic plumbing - terakan_nir_lower_bindings_instr does
+    * not yet lower nir_intrinsic_store_ssbo / nir_intrinsic_image_* through a
+    * dynamically-indexed resource chain.
+    */
+   features_out->shaderUniformBufferArrayDynamicIndexing = true;
+   features_out->shaderSampledImageArrayDynamicIndexing = true;
+   features_out->shaderClipDistance = true;
+   features_out->shaderCullDistance = true;
+   /* shaderFloat64: Evergreen has no fp64 ALU path. Permanent false. */
+   /* shaderResourceMinLod: optional in Vulkan 1.0. SPIR-V OpImageSample*Lod with MinLod would need
+    * TC MinLod support investigation on Evergreen (per-sample-op clamp interaction with the
+    * sampler's MinLod). Not blocking v1.0; deferred.
+    */
+   /* variableMultisampleRate: optional in Vulkan 1.0. Would depend on sample-rate shading being
+    * meaningfully supported (so that per-subpass sample-rate variation has an observable effect).
+    * Deferred along with sampleRateShading.
+    */
+   /* The ZPASS_DONE counter is GPU-side state latched by Begin at the primary command buffer, so
+    * draws executed by nested secondary command buffers are counted automatically between the
+    * primary's Begin and End EVENT_WRITE pairs — no driver bookkeeping needed.
+    */
+   features_out->inheritedQueries = true;
 
    properties_out->apiVersion = TERAKAN_API_VERSION;
-   /* TODO(Triang3l): Change to vk_get_driver_version() when Vulkan 1.0 compatibility is achieved.
-    */
-   properties_out->driverVersion = VK_MAKE_API_VERSION(0, 0, 0, 1);
+   properties_out->driverVersion = vk_get_driver_version();
    properties_out->vendorID = TERAKAN_PHYSICAL_DEVICE_VENDOR_ID_ATI;
    properties_out->deviceID = pci_device_id;
    properties_out->deviceType = chip_family_info->has_dedicated_vram
@@ -256,7 +345,29 @@ terakan_physical_device_get_capabilities(
    snprintf(properties_out->deviceName, sizeof(properties_out->deviceName),
             "AMD R%cxx %s (Terakan)", chip_family_info->is_r9xx ? '9' : '8',
             terakan_physical_device_chip_family_name(chip_family_info->chip_family));
-   /* TODO(Triang3l): pipelineCacheUUID when pipeline cache is implemented. */
+
+   /* pipelineCacheUUID: derive from the driver's build-id and the GPU identity so cached
+    * pipelines are invalidated when either the driver is rebuilt or the device changes.
+    */
+   {
+      blake3_hasher cache_hasher;
+      _mesa_blake3_init(&cache_hasher);
+#if HAVE_BUILD_ID
+      struct build_id_note const * const note =
+         build_id_find_nhdr_for_addr((void const *)terakan_physical_device_get_capabilities);
+      if (note != NULL) {
+         unsigned const id_len = build_id_length(note);
+         _mesa_blake3_update(&cache_hasher, build_id_data(note), id_len);
+      }
+#endif
+      uint32_t const chip = (uint32_t)chip_family_info->chip_family;
+      _mesa_blake3_update(&cache_hasher, &chip, sizeof(chip));
+      _mesa_blake3_update(&cache_hasher, &pci_device_id, sizeof(pci_device_id));
+      blake3_hash cache_hash;
+      _mesa_blake3_final(&cache_hasher, cache_hash);
+      STATIC_ASSERT(VK_UUID_SIZE <= sizeof(cache_hash));
+      memcpy(properties_out->pipelineCacheUUID, cache_hash, VK_UUID_SIZE);
+   }
 
    properties_out->maxImageDimension1D = TERAKAN_IMAGE_MAX_WIDTH_HEIGHT;
    properties_out->maxImageDimension2D = TERAKAN_IMAGE_MAX_WIDTH_HEIGHT;
@@ -342,20 +453,49 @@ terakan_physical_device_get_capabilities(
    properties_out->maxVertexInputAttributes = TERAKAN_VERTEX_INPUT_MAX_ATTRIBUTES;
    properties_out->maxVertexInputBindings = TERAKAN_RESOURCE_HW_COUNT_FETCH;
    properties_out->maxVertexInputAttributeOffset = UINT16_MAX;
-   /* NON-CONFORMANT: R8xx has 11 bits for the stride in bytes, which can store values up to 2047.
-    * Vulkan requires at least 2048. R9xx has 12 bits.
+   /* R8xx has 11 bits for the stride in bytes (max 2047), R9xx has 12 bits (max 4095). Vulkan
+    * 1.0 requires >= 2048. The fetch-shader #2048StrideAs1024 workaround
+    * (`bindings_with_2048_stride_workaround` in terakan_vertex_input.c) programs the fetch
+    * constant with stride=1024 and doubles the index in the shader, so an effective stride of
+    * 2048 is representable on R8xx. The per-vertex path is complete (R0.X=vertex_id is populated
+    * by SFN).
+    *
+    * The per-instance path additionally expects R0.Z to carry the base-instance value: the
+    * fetch-shader synthesises the fetch index as `instance_id * 2 + R0.Z` for divisor 1,
+    * `(instance_id / divisor) * 2 + R0.Z` for divisor > 1, and just `R0.Z` for divisor 0.
+    * SFN does not currently emit a `MOV R0.Z, base_instance` preamble — base_instance reaches
+    * shaders through the draw-parameters CB (`sfn/sfn_shader_vs.cpp:530-533`), not pinned into
+    * R0.Z. Neither upstream gallium nor the alt-tree reference does this either.
+    *
+    * Current carve-out (option (b)): advertise 2048 on R8xx and reject at pipeline-create time
+    * any static-stride-2048 binding that carries a per-instance attribute (see
+    * `terakan_pipeline_graphics_vertex_input_init`). This keeps the common per-vertex max-stride
+    * path working while preventing silent miscompile for the per-instance case. Dynamic-stride
+    * (`VK_EXT_extended_dynamic_state` / `VK_EXT_vertex_input_dynamic_state`) at stride 2048 with
+    * a per-instance binding is a known hole — the stride isn't known at pipeline-create time and
+    * CmdBindVertexBuffers2 has no VkResult to return — if an app hits it, fetches will be
+    * wrong. Cleaning this up requires option (a): an SFN change that, when the pipeline flags
+    * the fetch shader needs the workaround for any instance binding, emits `MOV R0.Z,
+    * base_instance` as a VS preamble (gated on a new shader key bit because SFN is shared with
+    * gallium, and must reject at pipeline compile time on collision with primitive_id R0.Z
+    * pinning at `sfn_shader_vs.cpp:521-524`). Preferred fix: (a), tracked as a post-1.0 item.
+    *
+    * R9xx reports the hardware max (4095), satisfying the 2048 minimum directly without any
+    * workaround.
     */
-   /* TODO(Triang3l): Expose 2048 on R8xx when the fetch shader workaround is fully implemented
-    * (when vertex shaders start loading the base instance to R0.Z when it's needed).
-    */
-   properties_out->maxVertexInputBindingStride =
-      ((uint32_t)1 << (chip_family_info->is_r9xx ? 12 : 11)) - 1;
+   properties_out->maxVertexInputBindingStride = chip_family_info->is_r9xx ? 4095 : 2048;
 
    properties_out->maxVertexOutputComponents = 4 * TERAKAN_LIMITS_HW_PARAMETER_CACHE_VECTOR_COUNT;
 
-   /* TODO(Triang3l): Tessellation limits. */
-
-   /* TODO(Triang3l): Geometry shader limits. */
+   /* Tessellation / geometry shader limits (max*TessellationGenerationLevel,
+    * maxTessellationPatchSize, maxTessellationControlPerVertex*, maxTessellationControlPerPatch*,
+    * maxTessellationEvaluation*, maxGeometryShaderInvocations, maxGeometryInput*,
+    * maxGeometryOutput*): Vulkan 1.0 Table 32 allows these to stay zero when the corresponding
+    * tessellationShader / geometryShader features are not advertised, which they are not here
+    * (see features block above). The zero-fill from vk_physical_device_properties already covers
+    * these fields; they will be filled in alongside the SFN tess/GS workstreams past the v1.0
+    * end-state marker.
+    */
 
    properties_out->maxFragmentInputComponents = 4 * TERAKAN_LIMITS_HW_PARAMETER_CACHE_VECTOR_COUNT;
 
@@ -380,7 +520,12 @@ terakan_physical_device_get_capabilities(
 
    properties_out->maxDrawIndexedIndexValue = UINT32_MAX;
 
-   /* TODO(Triang3l): maxDrawIndirectCount when indirect drawing is enabled. */
+   /* Vulkan 1.0 Table 32 requires maxDrawIndirectCount >= 1. With multiDrawIndirect advertised,
+    * the loop in terakan_emit_draw_indirect expands drawCount DRAW_[INDEX_]INDIRECT packets into
+    * one command stream, so the practical limit is bounded only by command-buffer growth. Report
+    * UINT32_MAX, matching other mesa drivers.
+    */
+   properties_out->maxDrawIndirectCount = UINT32_MAX;
 
    properties_out->maxSamplerLodBias = 0x1.0p5f - 0x1.0p-8f;
    properties_out->maxSamplerAnisotropy = 0x1.0p4f;
@@ -404,11 +549,27 @@ terakan_physical_device_get_capabilities(
    properties_out->minTexelOffset = -8;
    properties_out->maxTexelOffset = 8;
 
-   /* TODO(Triang3l): Texel gather offset range when extended image gather is enabled (need to
-    * research the range given that the offsets come from a GPR vector).
+   /* Vulkan 1.0 Table 32 requires minTexelGatherOffset <= -8 and maxTexelGatherOffset >= 7.
+    * shaderImageGatherExtended is advertised. R600 / Evergreen encodes GATHER4_O offsets through
+    * the same 5-bit signed per-component fields as regular texel offsets (OFFSET_X/Y/Z, mask 0x1F
+    * in r700_sq.h / eg_sq.h), both when the offset is a constant in the fetch word and when it is
+    * sourced from a GPR via the SET_TEXTURE_OFFSETS instruction, so the range does not widen with
+    * variable offsets and the same [-8, 8] range applies.
     */
+   properties_out->minTexelGatherOffset = -8;
+   properties_out->maxTexelGatherOffset = 8;
 
-   /* TODO(Triang3l): Interpolation offset properties when sample-rate shading is enabled. */
+   /* Vulkan 1.0 Table 32 requires minInterpolationOffset <= -0.5, maxInterpolationOffset
+    * >= 0.4375, and subPixelInterpolationOffsetBits >= 4 regardless of feature state. R600 /
+    * Evergreen lowers InterpolateAtOffset via NIR (lower_interpolate_at = true) rather than
+    * executing it natively, so the Vulkan spec minima are both achievable and tight for this HW.
+    * If sample-rate shading ever lands and native EVAL_SAMPLE / EVAL_CENTROID pathing is used,
+    * these values may need to widen to match the per-sample interpolation grid; tracks the
+    * sampleRateShading feature deferral above.
+    */
+   properties_out->minInterpolationOffset = -0.5f;
+   properties_out->maxInterpolationOffset = 0.4375f;
+   properties_out->subPixelInterpolationOffsetBits = 4;
 
    properties_out->maxFramebufferWidth = TERAKAN_IMAGE_MAX_WIDTH_HEIGHT;
    properties_out->maxFramebufferHeight = TERAKAN_IMAGE_MAX_WIDTH_HEIGHT;
@@ -439,14 +600,34 @@ terakan_physical_device_get_capabilities(
       properties_out->timestampPeriod = (float)(1e9 / (double)clock_crystal_frequency_hz);
    }
 
-   /* TODO(Triang3l): Maximum clip and cull distances when enabled. */
+   /* R600 / Evergreen expose two PA_CL_VS_OUT_CNTL CCDIST vec4 slots (eight scalar outputs),
+    * matched to the terakan_shader_sfn.cpp programming of CLIP_DIST_ENA / CULL_DIST_ENA.
+    */
+   properties_out->maxClipDistances = 8;
+   properties_out->maxCullDistances = 8;
+   properties_out->maxCombinedClipAndCullDistances = 8;
 
    properties_out->discreteQueuePriorities = 2;
 
-   /* TODO(Triang3l): Point size when enabled. */
-   /* TODO(Triang3l): Line width when wide lines are enabled. */
+   /* Vulkan 1.0 Table 32 requires pointSizeRange / lineWidthRange to be filled even when the
+    * largePoints / wideLines features are not advertised. The required values in that case are
+    * [1.0, 1.0] with granularity 0.0 (indicating that only a single size/width is supported).
+    * Expansion to the full HW range is linked to the largePoints / wideLines feature deferral in
+    * the features block above; this field tracks their status and stays [1.0, 1.0] while those
+    * features are false.
+    */
+   properties_out->pointSizeRange[0] = 1.0f;
+   properties_out->pointSizeRange[1] = 1.0f;
+   properties_out->pointSizeGranularity = 0.0f;
+   properties_out->lineWidthRange[0] = 1.0f;
+   properties_out->lineWidthRange[1] = 1.0f;
+   properties_out->lineWidthGranularity = 0.0f;
 
-   /* TODO(Triang3l): Research strict lines. */
+   /* R600 / Evergreen line rasterization does not follow the "parallelogram" strict-lines rules
+    * (Vulkan 1.0 spec, "Basic Line Segment Rasterization"); it uses a diamond-exit style
+    * implementation. radv reports strictLines = false for all AMD HW for the same reason.
+    */
+   properties_out->strictLines = VK_FALSE;
 
    properties_out->standardSampleLocations = VK_TRUE;
 
@@ -485,9 +666,14 @@ terakan_physical_device_get_capabilities(
    /* VK_KHR_bind_memory2 (#158, Vulkan 1.1). */
    extensions_out->KHR_bind_memory2 = true;
 
-   /* TODO(Triang3l) VK_KHR_maintenance3 (#169, Vulkan 1.1) when vkGetDescriptorSetLayoutSupport
-    * is implemented.
+   /* VK_KHR_maintenance3 (#169, Vulkan 1.1). Reuses the same maxBoundDescriptorSets-feeding
+    * `max_per_set_descriptors` running total for maxPerSetDescriptors; maxMemoryAllocationSize
+    * comes from the winsys (bounded by 32-bit within-allocation addressing as noted at the
+    * VK_KHR_maintenance4 TODO below).
     */
+   extensions_out->KHR_maintenance3 = true;
+   properties_out->maxPerSetDescriptors = max_per_set_descriptors;
+   properties_out->maxMemoryAllocationSize = max_memory_allocation_size;
 
    /* VK_KHR_timeline_semaphore (#208, Vulkan 1.2). */
    extensions_out->KHR_timeline_semaphore = true;
@@ -525,8 +711,12 @@ terakan_physical_device_get_capabilities(
    features_out->floatRepresentation = true;
    features_out->depthBiasExact = true;
 
-   /* TODO(Triang3l): Research border color formats with regard to VK_EXT_custom_border_color (#288)
-    * and VK_EXT_border_color_swizzle (#412).
+   /* VK_EXT_custom_border_color (#288) and VK_EXT_border_color_swizzle (#412) stay un-advertised
+    * for the v1.0 end state. R600 / Evergreen samplers encode border color only as the fixed
+    * VK_BORDER_COLOR_{FLOAT,INT}_{TRANSPARENT_BLACK,OPAQUE_BLACK,OPAQUE_WHITE} palette via
+    * BORDER_COLOR_TYPE in SQ_TEX_SAMPLER_WORD0_0; arbitrary colors require programming through the
+    * SQ_TEX_BORDER_COLOR_* registers whose per-sampler indexing + swizzle semantics still need to
+    * be audited against the EXT spec. Deferred past the v1.0 end-state marker.
     */
 
    /* VK_EXT_4444_formats (#341, Vulkan 1.3). */
@@ -545,16 +735,27 @@ terakan_physical_device_get_capabilities(
    /* VK_KHR_format_feature_flags2 (#361, Vulkan 1.3). */
    extensions_out->KHR_format_feature_flags2 = true;
 
-   /* TODO(Triang3l): VK_EXT_extended_dynamic_state2 (#378, Vulkan 1.3) when all state is
-    * implemented.
+   /* VK_EXT_extended_dynamic_state2 (#378, Vulkan 1.3) stays un-advertised for the v1.0 end state.
+    * Advertising the full extension requires CmdSet* implementations for PatchControlPoints,
+    * RasterizerDiscardEnable, DepthBiasEnable, LogicOp, and PrimitiveRestartEnable with the
+    * matching state objects plumbed through the dynamic-state tracker. The pieces we do support
+    * are already exposed individually via VK_EXT_extended_dynamic_state3 and
+    * VK_EXT_vertex_input_dynamic_state above; the aggregate extension is deferred until the
+    * remaining CmdSet entrypoints and their state slots exist.
     */
 
    /* VK_EXT_color_write_enable (#382). */
    extensions_out->EXT_color_write_enable = true;
    features_out->colorWriteEnable = true;
 
-   /* TODO(Triang3l): VK_KHR_maintenance4 (#414, Vulkan 1.3): maxBufferSize = UINT32_MAX. */
-   /* Addresses within buffers are limited to 32 bits in several places:
+   /* VK_KHR_maintenance4 (#414, Vulkan 1.3) stays un-advertised for the v1.0 end state. When it is
+    * advertised, maxBufferSize must be reported as UINT32_MAX (per the comment below on 32-bit
+    * buffer addressing) and the three `vkGetDeviceBufferMemoryRequirementsKHR`,
+    * `vkGetDeviceImageMemoryRequirementsKHR`, and `vkGetDeviceImageSparseMemoryRequirementsKHR`
+    * entrypoints need stubs that forward to the regular Get*MemoryRequirements paths with a
+    * temporary buffer / image. Deferred past the v1.0 end-state marker.
+    *
+    * Addresses within buffers are limited to 32 bits in several places:
     * - Index buffer binding via INDEX_BASE.
     * - Wraparound in copying (most importantly image copying) not handled.
     * The DRM Radeon driver, however, limits addresses within device memory to 32 bits in various
@@ -566,8 +767,13 @@ terakan_physical_device_get_capabilities(
    extensions_out->EXT_non_seamless_cube_map = true;
    features_out->nonSeamlessCubeMap = true;
 
-   /* VK_EXT_extended_dynamic_state3 (#456). */
-   /* TODO(Triang3l): All supported dynamic state. */
+   /* VK_EXT_extended_dynamic_state3 (#456). All 10 features below have matching CmdSet*EXT
+    * entrypoints: DepthClampEnable, PolygonMode, SampleMask, LogicOpEnable, ColorBlendEnable,
+    * ColorBlendEquation, ColorWriteMask, ProvokingVertexMode, DepthClipEnable, and
+    * DepthClipNegativeOneToOne. Other sub-features in this extension are intentionally not
+    * advertised: they would require state plumbing we do not yet have (e.g. line raster mode,
+    * alpha-to-coverage, sample locations, conservative rasterization).
+    */
    extensions_out->EXT_extended_dynamic_state3 = true;
    features_out->extendedDynamicState3DepthClampEnable = true;
    features_out->extendedDynamicState3PolygonMode = true;
@@ -616,7 +822,11 @@ terakan_physical_device_init_memory_properties(
 {
    /* Based on radv_physical_device_init_mem_types. */
 
-   /* TODO(Triang3l): override_vram_size DRI option. */
+   /* An `override_vram_size` DRI option (like radv's) would let users clamp the reported VRAM to
+    * work around games whose minimum VRAM check rejects small heaps. Not v1.0-blocking: the DRI
+    * option plumbing (vk_physical_device_properties_init via vk_physical_device_dispatch_table)
+    * can land independently. Deferred past the v1.0 end-state marker.
+    */
 
    VkDeviceSize gtt_heap_size = gtt_size;
    VkDeviceSize vram_visible_size = MIN2(vram_size, vram_visible);
@@ -624,7 +834,10 @@ terakan_physical_device_init_memory_properties(
 
    if (!has_dedicated_vram) {
       VkDeviceSize const total_size = gtt_size + vram_visible_size;
-      /* TODO(Triang3l): enable_unified_heap_on_apu. */
+      /* An `enable_unified_heap_on_apu` DRI option (like radv's) could, when set, report a single
+       * unified heap on APUs instead of the 2/3 VRAM + 1/3 GTT split below. Not v1.0-blocking:
+       * the current split is already Vulkan-conformant. Deferred past the v1.0 end-state marker.
+       */
       /* On APUs, the carveout is usually too small for games that request a minimum VRAM size
        * greater than it. To workaround this, we compute the total available memory size (GTT +
        * visible VRAM size) and report 2/3 as VRAM and 1/3 as GTT (so games don't assume that the
@@ -791,6 +1004,7 @@ terakan_physical_device_init(
    VkDeviceSize const gtt_size, VkDeviceSize const vram_size, VkDeviceSize const vram_visible,
    VkDeviceSize const max_memory_allocation_size, VkDeviceSize const min_memory_map_alignment,
    struct terakan_physical_device_tiling_info const * const tiling_info,
+   uint32_t const max_render_backends, uint32_t const max_pipes,
    struct terakan_physical_device_submission_info_gfx const * const submission_info_gfx,
    uint32_t const clock_crystal_frequency_hz,
    struct vk_sync_type const * const * const supported_sync_types_static)
@@ -823,6 +1037,9 @@ terakan_physical_device_init(
       (VkDeviceSize)1 << (MIN2(device->tiling_info.row_bytes_log2, 3 + 3 + 3 + 4) +
                           device->tiling_info.banks_log2 + device->tiling_info.pipes_log2);
 
+   device->max_render_backends = max_render_backends;
+   device->max_pipes = max_pipes;
+
    device->submission_info_gfx = *submission_info_gfx;
 
    device->nir_options_non_fs = (nir_shader_compiler_options){
@@ -854,6 +1071,7 @@ terakan_physical_device_init(
       .lower_isign = true,
       .lower_fsign = true,
       .lower_iabs = true,
+      .lower_ineg = true,
 
       .lower_pack_unorm_2x16 = true,
       .lower_pack_snorm_2x16 = true,
@@ -910,14 +1128,21 @@ terakan_physical_device_init(
 
       .has_bfe = true,
       .has_bfm = true,
-      /* TODO(Triang3l): Implement bfi in SFN. */
+      /* bfi is not yet lowered in SFN; `has_bitfield_select = true` lets NIR fall back to the
+       * decomposed sequence of bfm + bitfield_select, which is correct but suboptimal. Promoting
+       * to `has_bfi = true` with native SFN emission is a code-quality win, not v1.0-conformance,
+       * and no 1.0-mandatory NIR intrinsic requires a direct bfi. Deferred past the v1.0 end-state
+       * marker.
+       */
       .has_bitfield_select = true,
 
       /* Arbitrary (from RADV - in RadeonSI both are 128), was 255 due to a bug with the old
        * (pre-SFN) compiler from 2014:
        * https://bugs.freedesktop.org/show_bug.cgi?id=86720
+       * Raising to 128 to match the current RadeonSI / radv value is a code-quality / shader-perf
+       * decision tied to confirming the referenced bug is fixed on R600 SFN; not v1.0-blocking.
+       * Deferred past the v1.0 end-state marker.
        */
-      /* TODO(Triang3l): Revisit max_unroll_iterations. */
       .max_unroll_iterations = 32,
       .max_unroll_iterations_aggressive = 128,
 

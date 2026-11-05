@@ -104,7 +104,10 @@ enum terakan_meta_shader_index {
    TERAKAN_META_SHADER_COPY_BUFFER_TO_IMAGE_PS,
    TERAKAN_META_SHADER_COPY_IMAGE_TO_BUFFER_PS,
    TERAKAN_META_SHADER_COPY_IMAGE_PS,
+   TERAKAN_META_SHADER_COPY_IMAGE_MSAA_PS,
    TERAKAN_META_SHADER_COPY_EXPAND_3X_PS,
+   TERAKAN_META_SHADER_BLIT_IMAGE_NEAREST_PS,
+   TERAKAN_META_SHADER_BLIT_IMAGE_LINEAR_PS,
 
    TERAKAN_META_SHADER_COUNT,
 };
@@ -115,7 +118,10 @@ extern struct terakan_meta_shader const terakan_meta_clear_color_ps;
 extern struct terakan_meta_shader const terakan_meta_copy_buffer_to_image_ps;
 extern struct terakan_meta_shader const terakan_meta_copy_image_to_buffer_ps;
 extern struct terakan_meta_shader const terakan_meta_copy_image_ps;
+extern struct terakan_meta_shader const terakan_meta_copy_image_msaa_ps;
 extern struct terakan_meta_shader const terakan_meta_copy_expand_3x_ps;
+extern struct terakan_meta_shader const terakan_meta_blit_image_nearest_ps;
+extern struct terakan_meta_shader const terakan_meta_blit_image_linear_ps;
 
 extern struct terakan_meta_shader const * const terakan_meta_shaders[TERAKAN_META_SHADER_COUNT];
 
@@ -162,8 +168,13 @@ void terakan_meta_begin_cb(struct terakan_gfx_command_writer * command_writer,
                            uint32_t cb_color_control_mode, uint32_t cb_target_mask,
                            uint8_t disable_blend_for_targets);
 
+/* `num_samples_log2`: 0 for single-sample meta passes (clear, copy, 3x expand) — nearly all
+ * callers. Pass log2(src_image->vk.samples) for CB_RESOLVE: the source MSAA attachment must be
+ * bound at its native sample count for the CB's fixed-function averager to read the per-sample
+ * slots correctly. Upper bound asserted inside: ≤ 3 on R8xx (1x/2x/4x/8x), ≤ 4 on R9xx (+16x).
+ */
 void terakan_meta_begin_2d(struct terakan_gfx_command_writer * command_writer,
-                           uint32_t pa_cl_vte_cntl);
+                           uint32_t pa_cl_vte_cntl, uint32_t num_samples_log2);
 
 void terakan_meta_begin_rects(struct terakan_gfx_command_writer * command_writer);
 
@@ -173,10 +184,11 @@ static inline void
 terakan_meta_begin_2d_immediate_rects(struct terakan_gfx_command_writer * const command_writer,
                                       uint32_t const pa_cl_vte_cntl,
                                       uint32_t const db_render_override,
-                                      bool const clear_db_depth_control)
+                                      bool const clear_db_depth_control,
+                                      uint32_t const num_samples_log2)
 {
    terakan_meta_set_db_render_override(command_writer, db_render_override);
-   terakan_meta_begin_2d(command_writer, pa_cl_vte_cntl);
+   terakan_meta_begin_2d(command_writer, pa_cl_vte_cntl, num_samples_log2);
    terakan_meta_begin_rects(command_writer);
    terakan_meta_begin_index_immediate_32(command_writer);
    if (clear_db_depth_control) {

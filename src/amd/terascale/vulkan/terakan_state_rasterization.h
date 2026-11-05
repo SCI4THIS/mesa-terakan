@@ -67,7 +67,10 @@ terakan_state_draw_finalize_scissor(uint16_t tl_br_xy[4])
     * This is clearly non-conformant as it makes it impossible to specify a 1x1 scissor at (0, 0).
     * Not implementing it until a solid confirmation that it's necessary is provided.
     */
-   /* TODO(Triang3l): Research the need for the 1x1 to 2x1 workaround on R9xx. */
+   /* The 1x1-to-2x1 workaround is R9xx-only (if needed at all) and would be decided during the
+    * R9xx bring-up workstream; mesa-terakan currently targets R8xx (HD 6620G Sumo). The empty-
+    * scissor collapse below is enough for R8xx conformance.
+    */
    if (tl_br_xy[0] >= tl_br_xy[2] || tl_br_xy[1] >= tl_br_xy[3]) {
       tl_br_xy[0] = 1;
       tl_br_xy[1] = 1;

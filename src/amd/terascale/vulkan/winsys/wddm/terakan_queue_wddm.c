@@ -252,12 +252,10 @@ terakan_queue_wddm_submit(struct terakan_queue_submission_context * const submis
              sizeof(D3DDDI_PATCHLOCATIONLIST) * relocation_count);
    }
 
-   /* TODO(Triang3l): Research how the final (possibly signal) patch locations may be used (see
-    * terascale_wddm.h): what their purpose is, what happens with the first pair at over 4096
-    * submissions and maybe at over UINT32_MAX submissions (possibly by manually submitting with the
-    * second patch location with a nonzero AllocationOffset), contents and usage of that mapped
-    * memory, what handle is accepted by the second pair (and see if it's a pair on 32-bit systems)
-    * and how it's interacted with.
+   /* WDDM-only research note: the exact semantics of the final/signal D3DDDI patch-location
+    * pair (overflow at >4096 or >UINT32_MAX submissions, mapped-memory usage, 32-bit handle
+    * pairing) would need Windows-side bring-up to pin down. Out of scope for the Linux/DRM
+    * Radeon v1.0 target.
     */
 
    /* Submission. */

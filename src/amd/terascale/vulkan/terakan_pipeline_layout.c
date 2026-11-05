@@ -62,7 +62,12 @@ terakan_CmdBindDescriptorSets(VkCommandBuffer const commandBuffer,
    mesa_shader_stage const shader_stage_first = is_compute ? MESA_SHADER_COMPUTE : MESA_SHADER_VERTEX;
    mesa_shader_stage const shader_stage_last =
       is_compute ? MESA_SHADER_COMPUTE : MESA_SHADER_FRAGMENT;
-   /* TODO(Triang3l): Apply bindings to the compute stage. */
+   /* The is_compute branch is still unreachable at call time because vkCreateComputePipelines
+    * returns VK_ERROR_FEATURE_NOT_PRESENT (terakan_pipeline.c:113-129), so no compute pipeline
+    * can be bound. The compute-side setters are wired below via the `_compute` scalar function-
+    * pointer globals (active-vulkan-1.0.md task #10 sub-step (c.5)+(c.6)); they will become
+    * reachable once sub-steps (d)+(e) flip the compute pipeline factory.
+    */
 
    uint32_t const * set_dynamic_offsets = pDynamicOffsets;
 
@@ -92,8 +97,9 @@ terakan_CmdBindDescriptorSets(VkCommandBuffer const commandBuffer,
 
          /* Resources. */
 
-         terakan_hw_state_draw_set_sq_resource_function const graphics_resource_setter =
-            is_compute ? NULL : terakan_hw_state_draw_set_sq_resource_for_stage[shader_stage];
+         terakan_hw_state_draw_set_sq_resource_function const resource_setter =
+            is_compute ? terakan_hw_state_draw_set_sq_resource_compute
+                       : terakan_hw_state_draw_set_sq_resource_for_stage[shader_stage];
          uint8_t const shader_resource_set_base = layout_set->first_shader_resources[shader_stage];
          struct terakan_descriptor_set_layout_shader_range const * const resource_ranges =
             set_layout->shader_ranges + set_layout_shader->first_resource_range;
@@ -127,7 +133,7 @@ terakan_CmdBindDescriptorSets(VkCommandBuffer const commandBuffer,
                      resource.resource[2] = (resource.resource[2] & C_030008_BASE_ADDRESS_HI) |
                                             S_030008_BASE_ADDRESS_HI(resource_address >> 32);
                   }
-                  graphics_resource_setter(&command_writer->hw_state_draw,
+                  resource_setter(&command_writer->hw_state_draw,
                                            range_shader_base + resource_index, resource.bo,
                                            resource.resource);
                }
@@ -136,7 +142,7 @@ terakan_CmdBindDescriptorSets(VkCommandBuffer const commandBuffer,
                     ++resource_index) {
                   struct terakan_descriptor_set_resource const * const resource =
                      &range_set_resources[resource_index];
-                  graphics_resource_setter(&command_writer->hw_state_draw,
+                  resource_setter(&command_writer->hw_state_draw,
                                            range_shader_base + resource_index, resource->bo,
                                            resource->resource);
                }
@@ -145,8 +151,9 @@ terakan_CmdBindDescriptorSets(VkCommandBuffer const commandBuffer,
 
          /* Samplers. */
 
-         terakan_hw_state_draw_set_sq_sampler_function const graphics_sampler_setter =
-            is_compute ? NULL : terakan_hw_state_draw_set_sq_sampler_for_stage[shader_stage];
+         terakan_hw_state_draw_set_sq_sampler_function const sampler_setter =
+            is_compute ? terakan_hw_state_draw_set_sq_sampler_compute
+                       : terakan_hw_state_draw_set_sq_sampler_for_stage[shader_stage];
          uint8_t const shader_sampler_set_base = layout_set->first_shader_samplers[shader_stage];
          struct terakan_descriptor_set_layout_shader_range const * const sampler_ranges =
             set_layout->shader_ranges + set_layout_shader->first_sampler_range;
@@ -166,11 +173,31 @@ terakan_CmdBindDescriptorSets(VkCommandBuffer const commandBuffer,
                 * may be left uninitialized if they're not statically referenced by the pipeline.
                 */
                if (likely(G_03C008_TYPE(sampler->sampler[2]))) {
-                  graphics_sampler_setter(&command_writer->hw_state_draw,
-                                          range_shader_base + sampler_index, sampler->sampler,
-                                          sampler->border_color);
+                  uint8_t const shader_sampler = range_shader_base + sampler_index;
+                  sampler_setter(&command_writer->hw_state_draw, shader_sampler,
+                                 sampler->sampler, sampler->border_color);
+                  /* R8xx has no FORCE_UNNORMALIZED (Cayman-only, evergreend.h:1628), so the shader
+                   * divides the coordinates by the texture size instead and needs to be told which
+                   * slots that applies to. Immutable samplers are resolved at compile time and are
+                   * not in the mask, but they are also written through this loop, so the bit is
+                   * maintained for every slot regardless -- a shader simply does not read the ones
+                   * it resolved statically. See
+                   * nir/terakan_nir_lower_unnormalized_coordinates.c for the consumer.
+                   */
+                  assert(shader_sampler < 32);
+                  uint32_t * const unnormalized_mask =
+                     &command_writer->push_constants_state.driver_constants
+                         .sampler_unnormalized[shader_stage];
+                  uint32_t const unnormalized_bit = BITFIELD_BIT(shader_sampler);
+                  uint32_t const unnormalized_mask_new =
+                     sampler->unnormalized_coordinates ? (*unnormalized_mask | unnormalized_bit)
+                                                       : (*unnormalized_mask & ~unnormalized_bit);
+                  if (unnormalized_mask_new != *unnormalized_mask) {
+                     *unnormalized_mask = unnormalized_mask_new;
+                     command_writer->push_constants_state.driver_constants_modified |=
+                        BITFIELD_BIT(TERAKAN_PUSH_CONSTANT_DRIVER_INDEX_SAMPLER_UNNORMALIZED);
+                  }
                }
-               /* TODO(Triang3l): Unnormalized coordinates on R8xx. */
             }
          }
       }

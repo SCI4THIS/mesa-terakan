@@ -110,8 +110,11 @@ struct terakan_image_surface {
    struct terakan_image_surface_aspect aspects[TERAKAN_FORMAT_MAX_ASPECTS];
 };
 
-/* TODO(Triang3l): Replace in favor of terakan_format_aspect_index, but need to handle errors when
- * using it, and never to use it with combined depth and stencil.
+/* Two-aspect lookup specialized for the single bit that `terakan_image_surface_aspect` tracks
+ * (depth-plane index versus stencil-plane index). A general `terakan_format_aspect_index` would
+ * require caller-side error handling for combined depth/stencil and a rejection for multi-planar
+ * formats; the current narrow helper gives the callers an unconditional branchless two-aspect
+ * index without that surface. Not a v1.0 correctness gap.
  */
 static inline unsigned
 terakan_image_surface_aspect_index(VkFormat const image_format, VkImageAspectFlagBits const aspect)

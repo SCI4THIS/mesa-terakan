@@ -68,7 +68,16 @@ bool terakan_nir_compact_fragment_data_locations(nir_shader * shader,
 bool terakan_nir_lower_bindings(nir_shader * shader, struct terakan_pipeline_layout const * layout,
                                 BITSET_WORD * resources_needed, uint32_t * samplers_needed);
 
-bool terakan_nir_lower_sin_cos(nir_shader * shader);
+/* Divide the sample coordinates by `textureSize(tex, 0)` for `txl` / `txd` operations that may
+ * observe a sampler created with `unnormalizedCoordinates`, predicated on the per-stage mask in
+ * `terakan_push_constants_driver::sampler_unnormalized`. R8xx has no `FORCE_UNNORMALIZED` in the
+ * sampler constant (Cayman-only), so this stands in for that register bit. Must run after
+ * terakan_nir_lower_bindings, because it emits an additional load_buffer_resource_r600 reaching
+ * into the push-constant buffer whose resource slot that pass assigns.
+ */
+bool terakan_nir_lower_unnormalized_coordinates(nir_shader * shader,
+                                                BITSET_WORD * resources_needed,
+                                                uint32_t * driver_constants_needed);
 
 #ifdef __cplusplus
 }

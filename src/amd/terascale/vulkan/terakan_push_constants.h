@@ -41,6 +41,9 @@ extern "C" {
 
 enum terakan_push_constants_driver_index {
    TERAKAN_PUSH_CONSTANT_DRIVER_INDEX_DRAW_ID,
+   TERAKAN_PUSH_CONSTANT_DRIVER_INDEX_NUM_WORKGROUPS,
+   TERAKAN_PUSH_CONSTANT_DRIVER_INDEX_BASE_WORKGROUP,
+   TERAKAN_PUSH_CONSTANT_DRIVER_INDEX_SAMPLER_UNNORMALIZED,
 
    TERAKAN_PUSH_CONSTANT_DRIVER_INDEX_COUNT,
 };
@@ -50,6 +53,29 @@ static_assert(TERAKAN_PUSH_CONSTANT_DRIVER_INDEX_COUNT <= 32,
 
 struct terakan_push_constants_driver {
    uint32_t draw_id;
+
+   /* Vulkan `gl_NumWorkGroups` built-in. Populated by `vkCmdDispatch{,Base,Indirect}` for compute
+    * dispatches; Terascale has no hardware register that exposes the dispatch grid to the shader,
+    * so the compute shader reads it from this driver push-constant slot.
+    */
+   uint32_t num_workgroups[3];
+
+   /* `vkCmdDispatchBase`'s `baseGroupX/Y/Z`. Terascale's `VGT_COMPUTE_START_X/Y/Z` is always
+    * programmed to zero because its semantics do not match Vulkan's `DispatchBase` definition
+    * (which requires the base to be ADDED to the kernel's `gl_WorkGroupID`, not replaced). The
+    * compute shader therefore adds this value to its workgroup-id itself.
+    */
+   uint32_t base_workgroup[3];
+
+   /* One bit per hardware sampler slot of the stage, set when the bound sampler was created with
+    * `unnormalizedCoordinates`.
+    *
+    * R8xx has no `FORCE_UNNORMALIZED` in the sampler constant -- the bit exists only on Cayman --
+    * so the division by the texture size has to be done by the shader, and the shader can only
+    * learn which of its samplers need it at draw time. Immutable samplers are resolved at
+    * compilation instead and never consult this mask.
+    */
+   uint32_t sampler_unnormalized[MESA_SHADER_STAGES];
 };
 
 /* Aligned to vec4 to avoid placing vectors in different kcache lines more likely to be accessed in
@@ -116,6 +142,14 @@ struct terakan_gfx_command_writer;
 
 void terakan_push_constants_apply(struct terakan_gfx_command_writer * command_writer,
                                   bool is_compute);
+
+/* Setters for the two compute-only driver slots. Called by `vkCmdDispatch{,Base,Indirect}` (the
+ * compute pipelines workstream, task #10). Unused on the graphics path.
+ */
+void terakan_push_constants_set_num_workgroups(struct terakan_gfx_command_writer * command_writer,
+                                               uint32_t x, uint32_t y, uint32_t z);
+void terakan_push_constants_set_base_workgroup(struct terakan_gfx_command_writer * command_writer,
+                                               uint32_t x, uint32_t y, uint32_t z);
 
 #ifdef __cplusplus
 }

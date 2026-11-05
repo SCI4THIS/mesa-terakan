@@ -459,3 +459,112 @@ too_many_descriptors:
       "The application creates a descriptor set layout that is too large to fit into the hardware "
       "binding register spaces");
 }
+
+/* Dry-runs the same limit checks that terakan_CreateDescriptorSetLayout performs - per-binding
+ * descriptor count, set-wide UAV / resource / sampler totals, per-stage pixel vs non-pixel resource
+ * budgets, per-stage sampler budget, and immutable sampler budget. Keeps the two in sync by only
+ * comparing against the TERAKAN_RESOURCE_RANGE_MUTABLE_MAX_COUNT_* and TERAKAN_SAMPLER_HW_COUNT_*
+ * constants used by the real path.
+ */
+VKAPI_ATTR void VKAPI_CALL
+terakan_GetDescriptorSetLayoutSupport(VkDevice const deviceHandle,
+                                      VkDescriptorSetLayoutCreateInfo const * const pCreateInfo,
+                                      VkDescriptorSetLayoutSupport * const pSupport)
+{
+   struct terakan_device * const device = terakan_device_from_handle(deviceHandle);
+
+   pSupport->supported = VK_FALSE;
+
+   VkShaderStageFlags stage_mask =
+      VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
+   if (device->vk.enabled_features.geometryShader) {
+      stage_mask |= VK_SHADER_STAGE_GEOMETRY_BIT;
+   }
+   if (device->vk.enabled_features.tessellationShader) {
+      stage_mask |=
+         VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+   }
+
+   uint32_t set_uav_count = 0;
+   uint32_t set_resource_count = 0;
+   uint32_t set_sampler_count = 0;
+   uint32_t immutable_sampler_count = 0;
+   uint32_t stage_resource_count[MESA_SHADER_STAGES] = {0};
+   uint32_t stage_sampler_count[MESA_SHADER_STAGES] = {0};
+
+   for (uint32_t i = 0; i < pCreateInfo->bindingCount; ++i) {
+      VkDescriptorSetLayoutBinding const * const binding = &pCreateInfo->pBindings[i];
+      uint32_t const descriptor_count = binding->descriptorCount;
+      if (descriptor_count == 0) {
+         continue;
+      }
+
+      if (descriptor_count >= MAX3(TERAKAN_RESOURCE_RANGE_MUTABLE_MAX_COUNT_NON_PIXEL,
+                                   TERAKAN_RESOURCE_RANGE_MUTABLE_MAX_COUNT_PIXEL,
+                                   TERAKAN_SAMPLER_HW_COUNT_PER_STAGE)) {
+         return;
+      }
+
+      VkDescriptorType const binding_type = binding->descriptorType;
+      bool const has_resource = terakan_descriptor_type_has_resource(binding_type);
+      bool const has_sampler = terakan_descriptor_type_has_sampler(binding_type);
+      bool const has_uav = terakan_descriptor_type_has_uav(binding_type);
+      unsigned binding_stages = (unsigned)(binding->stageFlags & stage_mask);
+
+      if (has_sampler && binding->pImmutableSamplers != NULL) {
+         if (TERAKAN_SAMPLER_HW_COUNT_PER_STAGE * MESA_SHADER_STAGES - immutable_sampler_count <
+             descriptor_count) {
+            return;
+         }
+         immutable_sampler_count += descriptor_count;
+      }
+
+      if (has_uav) {
+         if (TERAKAN_RESOURCE_RANGE_MUTABLE_MAX_COUNT_IN_PIPELINE - set_uav_count <
+             descriptor_count) {
+            return;
+         }
+         set_uav_count += descriptor_count;
+      }
+
+      if (has_resource) {
+         if (TERAKAN_RESOURCE_RANGE_MUTABLE_MAX_COUNT_IN_PIPELINE - set_resource_count <
+             descriptor_count) {
+            return;
+         }
+         set_resource_count += descriptor_count;
+
+         unsigned remaining = binding_stages;
+         while (remaining) {
+            int const stage_index = u_bit_scan(&remaining);
+            uint32_t const stage_limit = stage_index == MESA_SHADER_FRAGMENT
+                                            ? TERAKAN_RESOURCE_RANGE_MUTABLE_MAX_COUNT_PIXEL
+                                            : TERAKAN_RESOURCE_RANGE_MUTABLE_MAX_COUNT_NON_PIXEL;
+            if (stage_limit - stage_resource_count[stage_index] < descriptor_count) {
+               return;
+            }
+            stage_resource_count[stage_index] += descriptor_count;
+         }
+      }
+
+      if (has_sampler) {
+         if (TERAKAN_SAMPLER_HW_COUNT_PER_STAGE * MESA_SHADER_STAGES - set_sampler_count <
+             descriptor_count) {
+            return;
+         }
+         set_sampler_count += descriptor_count;
+
+         unsigned remaining = binding_stages;
+         while (remaining) {
+            int const stage_index = u_bit_scan(&remaining);
+            if (TERAKAN_SAMPLER_HW_COUNT_PER_STAGE - stage_sampler_count[stage_index] <
+                descriptor_count) {
+               return;
+            }
+            stage_sampler_count[stage_index] += descriptor_count;
+         }
+      }
+   }
+
+   pSupport->supported = VK_TRUE;
+}

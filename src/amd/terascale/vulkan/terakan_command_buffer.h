@@ -231,6 +231,17 @@ struct terakan_gfx_command_writer {
 
    bool is_beginning_indirect_buffer;
 
+   /* Tracks the hardware's active bind point (graphics vs. compute). Set `true` by
+    * `vkCmdDispatch{,Base,Indirect}` after the dispatch sequence; cleared by graphics-side
+    * entrypoints through `_split_for_draw_compute_switch`. Evergreen's graphics and compute state
+    * cannot be safely switched mid-IB — on mode flip the current IB must be closed with a cache
+    * flush so the kernel-submitted next IB re-establishes the destination mode's register state.
+    * Dormant today: `vkCreateComputePipelines` returns `VK_ERROR_FEATURE_NOT_PRESENT`
+    * (`terakan_pipeline.c:122-138`), so no dispatch ever runs and `is_compute_active` never flips.
+    * active-vulkan-1.0.md task #10 sub-step (a.1).
+    */
+   bool is_compute_active;
+
 #ifndef NDEBUG
    bool is_emitting;
    uint32_t current_emission_relocations_remaining;
@@ -348,6 +359,25 @@ terakan_gfx_command_writer_add_relocation_for_40_bits(
 
 void terakan_gfx_command_writer_emit_event_write_eop_discarding_data(
    struct terakan_gfx_command_writer * command_writer, uint32_t event);
+
+/* Splits the current hardware indirect buffer at a graphics↔compute bind-point transition.
+ * Evergreen's graphics and compute state cannot be safely switched mid-IB, so when
+ * `is_compute_active` disagrees with `entering_compute` and the IB has content, this flushes the
+ * old mode's writes, closes the IB, and lets the next IB's preamble re-establish the destination
+ * context. Dormant today — `is_compute_active` never flips because `vkCreateComputePipelines`
+ * returns `VK_ERROR_FEATURE_NOT_PRESENT`. active-vulkan-1.0.md task #10 sub-step (a.2).
+ */
+void terakan_gfx_command_writer_split_for_draw_compute_switch(
+   struct terakan_gfx_command_writer * command_writer, bool entering_compute);
+
+/* Compute-side counterpart of `terakan_before_draw`. Splits the IB on a graphics→compute
+ * transition, drains all pending barrier actions (so inter-dispatch and inherited graphics-side
+ * barriers both resolve against the compute IB's preamble), then marks compute active so the next
+ * graphics draw's split helper closes this IB in turn. Unused today — no `vkCmdDispatch*` path.
+ * active-vulkan-1.0.md task #10 sub-step (a.4).
+ */
+void terakan_gfx_command_writer_before_app_dispatch(
+   struct terakan_gfx_command_writer * command_writer);
 
 struct terakan_command_pool {
    struct vk_command_pool vk;

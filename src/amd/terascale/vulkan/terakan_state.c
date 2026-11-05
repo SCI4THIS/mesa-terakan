@@ -243,8 +243,6 @@ terakan_state_draw_apply_sq_pgm_fs(struct terakan_gfx_command_writer * const com
 static void
 terakan_state_draw_apply_sq_resources_fs(struct terakan_gfx_command_writer * const command_writer)
 {
-   bool const is_r9xx =
-      terakan_gfx_command_writer_physical_device(command_writer)->chip_family_info.is_r9xx;
    uint32_t resource[8] = {
       [3] = S_03000C_DST_SEL_X(TERASCALE_SWIZZLE_X) | S_03000C_DST_SEL_Y(TERASCALE_SWIZZLE_Y) |
             S_03000C_DST_SEL_Z(TERASCALE_SWIZZLE_Z) | S_03000C_DST_SEL_W(TERASCALE_SWIZZLE_W),
@@ -260,12 +258,15 @@ terakan_state_draw_apply_sq_resources_fs(struct terakan_gfx_command_writer * con
       resource[1] = buffer->size_bytes_minus_1;
       /* The stride field in the descriptor is 11 bits wide on R8xx, 12 bits wide on R9xx.
        * To support 2048 stride, which is mandatory on Vulkan and Direct3D, the fetch shader
-       * multiplies the index by 2 on R8xx, so the stride in the descriptor should be divided by 2.
+       * multiplies the index by 2 whenever `binding_stride >= 2048` (see
+       * `bindings_with_2048_stride_workaround` in terakan_vertex_input.c), so the descriptor
+       * stride must be halved to match in that same case — on both families, regardless of
+       * `is_r9xx`. On R8xx the bit above the 11-bit stride field is `CLAMP_X`, so an unhalved
+       * 2048 would corrupt it; halving keeps the value inside the 11-bit field.
        */
       resource[2] =
          S_030008_BASE_ADDRESS_HI(buffer->va >> 32) |
-         ((uint32_t)((buffer->stride >> (is_r9xx && buffer->stride >= 0x800 ? 1 : 0)) & 0xFFF)
-          << 8);
+         ((uint32_t)((buffer->stride >> (buffer->stride >= 0x800 ? 1 : 0)) & 0xFFF) << 8);
       terakan_hw_state_draw_set_sq_resource_vi(&command_writer->hw_state_draw, buffer_index,
                                                buffer->bo, resource);
    }
@@ -406,7 +407,10 @@ terakan_state_draw_apply_viewport(struct terakan_gfx_command_writer * const comm
                     pa_cl_gb_vert_horz_clip_disc_adj[axis][0]);
          }
       }
-      /* TODO(Triang3l): Discard rectangle ratio for points and lines. */
+      /* `VK_EXT_discard_rectangles` is not advertised by this ICD and is not a Vulkan 1.0 feature,
+       * so the point/line discard-rectangle ratio path cannot be reached. Revisit if the
+       * extension is ever exposed.
+       */
       bool const pa_cl_gb_modified =
          memcmp(command_writer->hw_state_draw.pa_cl_gb_vert_horz_clip_disc_adj,
                 pa_cl_gb_vert_horz_clip_disc_adj, sizeof(pa_cl_gb_vert_horz_clip_disc_adj)) != 0;
@@ -511,7 +515,12 @@ terakan_state_draw_apply_pa_cl_vte_cntl(struct terakan_gfx_command_writer * cons
 static void
 terakan_state_draw_apply_pa_sc_mode_cntl_0(struct terakan_gfx_command_writer * const command_writer)
 {
-   /* TODO(Triang3l): MSAA_ENABLE, LINE_STIPPLE_ENABLE from a variable. */
+   /* MSAA_ENABLE is currently written by the meta/apply paths that know the sample count (see
+    * `terakan_meta_2d.c` and the color-render-target state wiring); keeping it out of the
+    * variable-driven apply here mirrors the "variable bit set externally" pattern. LINE_STIPPLE
+    * is a `VK_EXT_line_rasterization` feature not exposed by this ICD and not in Vulkan 1.0, so
+    * the bit stays off here.
+    */
    uint32_t const pa_sc_mode_cntl_0 = S_028A48_VPORT_SCISSOR_ENABLE(1);
    bool const modified = command_writer->hw_state_draw.pa_sc_mode_cntl_0 != pa_sc_mode_cntl_0;
    command_writer->hw_state_draw.pa_sc_mode_cntl_0 = pa_sc_mode_cntl_0;
@@ -845,8 +854,10 @@ terakan_state_draw_apply_cb_color_rtv(struct terakan_gfx_command_writer * const 
 
    bool cb_dual_export_allowed = true;
 
-   /* TODO(Triang3l): Merge application of color attachment bindings with color write mask
-    * application, unbinding color attachments with writing disabled to skip 32bpc exports for them.
+   /* Merging the color-attachment-binding apply with the color-write-mask apply (to unbind
+    * fully-masked-out attachments and skip their 32bpc exports) is a perf optimization. Today
+    * the two apply paths run independently; the extra exports are silently discarded by the
+    * mask. Not a v1.0 correctness gap.
     */
 
    {

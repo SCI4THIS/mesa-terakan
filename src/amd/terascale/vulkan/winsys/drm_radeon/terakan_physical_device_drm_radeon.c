@@ -243,6 +243,36 @@ terakan_physical_device_drm_radeon_try_create(struct vk_instance * const instanc
       clock_crystal_frequency_khz = 0;
    }
 
+   /* RADEON_INFO_NUM_BACKENDS: enabled DB render backends, needed to size occlusion query slots
+    * (each ZPASS_DONE EVENT_WRITE_EOP writes one 64-bit begin + one 64-bit end counter per RB).
+    * Failure is non-fatal — OCCLUSION query pools are refused in that case, matching how the
+    * timestamp path handles a missing crystal frequency.
+    */
+   __u32 num_backends = 0;
+   struct drm_radeon_info num_backends_info_arguments = {
+      .request = RADEON_INFO_NUM_BACKENDS,
+      .value = (__u64)(void *)&num_backends,
+   };
+   if (drmCommandWriteRead(render_node_fd, DRM_RADEON_INFO, &num_backends_info_arguments,
+                           sizeof(num_backends_info_arguments)) != 0) {
+      num_backends = 0;
+   }
+
+   /* RADEON_INFO_MAX_PIPES: SQ quad-pipe count. Used by `vkCmdDispatch*` for `SQ_LDS_ALLOC`
+    * `NUM_WAVES` computation. Mesa's DRM winsys defaults to 2 on ioctl failure because all
+    * Evergreen+ chips have ≥ 2 pipes (`radeon_drm_winsys.c:523-527`); we match that floor.
+    */
+   __u32 max_pipes = 2;
+   struct drm_radeon_info max_pipes_info_arguments = {
+      .request = RADEON_INFO_MAX_PIPES,
+      .value = (__u64)(void *)&max_pipes,
+   };
+   if (drmCommandWriteRead(render_node_fd, DRM_RADEON_INFO, &max_pipes_info_arguments,
+                           sizeof(max_pipes_info_arguments)) != 0 ||
+       max_pipes < 2) {
+      max_pipes = 2;
+   }
+
    /* Initialize the physical device object. */
 
    struct terakan_physical_device_drm_radeon * const device = vk_alloc(
@@ -315,8 +345,8 @@ terakan_physical_device_drm_radeon_try_create(struct vk_instance * const instanc
       &device->base, instance, &terakan_physical_device_drm_radeon_fn,
       drm_device->deviceinfo.pci->device_id, page_size, (VkDeviceSize)gem_info.gart_size,
       (VkDeviceSize)gem_info.vram_size, (VkDeviceSize)gem_info.vram_visible,
-      UINT32_MAX & ~(page_size - 1), page_size, &tiling_info, &submission_info_gfx,
-      1000 * clock_crystal_frequency_khz, device->sync_types);
+      UINT32_MAX & ~(page_size - 1), page_size, &tiling_info, num_backends, max_pipes,
+      &submission_info_gfx, 1000 * clock_crystal_frequency_khz, device->sync_types);
    if (result != VK_SUCCESS) {
       goto fail_render_node_path;
    }

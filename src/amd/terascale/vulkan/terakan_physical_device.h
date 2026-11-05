@@ -143,6 +143,23 @@ struct terakan_physical_device {
    struct terakan_physical_device_tiling_info tiling_info;
    VkDeviceSize buffer_image_bo_alignment;
 
+   /* Number of enabled DB render backends, from RADEON_INFO_NUM_BACKENDS on DRM Radeon. Each
+    * ZPASS_DONE EVENT_WRITE_EOP writes one 64-bit begin + one 64-bit end counter per RB into the
+    * query slot (16 bytes per RB), followed by a 16-byte fence/alignment tail — matching the
+    * r600_query.c sizing of OCCLUSION slots at `16 * max_render_backends + 16`. 0 means the winsys
+    * could not determine the count, in which case OCCLUSION query pools must be refused.
+    */
+   uint32_t max_render_backends;
+
+   /* SQ quad-pipe count, from RADEON_INFO_MAX_PIPES on DRM Radeon (DRM default 2 for all
+    * Evergreen+). Used by `vkCmdDispatch*` to compute `SQ_LDS_ALLOC::NUM_WAVES` as
+    * `ceil(workgroup_threads / (16 * max_pipes))` — see evergreen_compute.c:266-267. Distinct from
+    * `max_render_backends`: Caicos has 1 RB and 2 pipes, so the two counts don't coincide. 2 is
+    * also the DRM winsys default when the ioctl fails, chosen because all Evergreen+ chips have at
+    * least 2 pipes (`winsys/radeon/drm/radeon_drm_winsys.c:523-527`).
+    */
+   uint32_t max_pipes;
+
    struct terakan_physical_device_submission_info_gfx submission_info_gfx;
 
    /* nir_shader_compiler_options's lifetime must be at least as long as that of any NIR shader. */
@@ -176,6 +193,7 @@ VkResult terakan_physical_device_init(
    VkDeviceSize vram_visible, VkDeviceSize max_memory_allocation_size,
    VkDeviceSize min_memory_map_alignment,
    struct terakan_physical_device_tiling_info const * tiling_info,
+   uint32_t max_render_backends, uint32_t max_pipes,
    struct terakan_physical_device_submission_info_gfx const * submission_info_gfx,
    uint32_t clock_crystal_frequency_hz,
    struct vk_sync_type const * const * supported_sync_types_static);

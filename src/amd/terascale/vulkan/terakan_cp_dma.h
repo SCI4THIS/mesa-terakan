@@ -56,6 +56,14 @@ void terakan_cp_dma_copy(struct terakan_gfx_command_writer * command_writer,
                          uint64_t dst_va, enum terakan_bo_priority dst_bo_priority,
                          VkDeviceSize size);
 
+/* Fills [dst_va, dst_va + size) with the 32-bit value `clear_value` using CP_DMA with SRC_SEL=DATA.
+ * dst_va and size must be 4-byte aligned.
+ */
+void terakan_cp_dma_fill(struct terakan_gfx_command_writer * command_writer,
+                         struct terakan_bo const * dst_bo, uint64_t dst_va,
+                         enum terakan_bo_priority dst_bo_priority, VkDeviceSize size,
+                         uint32_t clear_value);
+
 #ifdef __cplusplus
 }
 #endif

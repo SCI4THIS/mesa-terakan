@@ -377,12 +377,14 @@ terakan_CmdClearAttachments(VkCommandBuffer const commandBuffer, uint32_t const 
       TERAKAN_META_PA_CL_VTE_CNTL_2D |
          (depth_stencil_clear_aspects & VK_IMAGE_ASPECT_DEPTH_BIT ? S_028818_VPORT_Z_OFFSET_ENA(1)
                                                                   : 0),
-      TERAKAN_META_DB_RENDER_OVERRIDE_DEFAULT, false);
+      TERAKAN_META_DB_RENDER_OVERRIDE_DEFAULT, false, 0);
 
    terakan_meta_set_vs(command_writer, TERAKAN_META_SHADER_POSITION_AND_LAYER_FROM_INDEX_VS);
 
-   /* TODO(Triang3l): Clear CMask and update the stored fast clear color for COPY_DW into the
-    * registers if clearing the entire image.
+   /* CMask-based fast-clear optimization is deferred: `terakan_image.c` does not allocate CMask
+    * surfaces on R8xx, so there is no fast-clear metadata to update here. Enabling CMask /
+    * fast clears is a performance workstream that includes compression metadata, the
+    * CB_COLOR*_INFO fast-clear-enable bits, and CMask eliminates. Not a v1.0 correctness gap.
     */
 
    command_writer->push_constants_state.up_to_date_push_constants_bound_to_stages &=

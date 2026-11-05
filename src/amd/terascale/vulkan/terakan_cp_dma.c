@@ -199,6 +199,49 @@ terakan_cp_dma_copy(struct terakan_gfx_command_writer * const command_writer,
    }
 }
 
+void
+terakan_cp_dma_fill(struct terakan_gfx_command_writer * const command_writer,
+                    struct terakan_bo const * const dst_bo, uint64_t const dst_va,
+                    enum terakan_bo_priority const dst_bo_priority, VkDeviceSize const size,
+                    uint32_t const clear_value)
+{
+   assert((dst_va & 3) == 0);
+   assert((size & 3) == 0);
+
+   terakan_cp_dma_prepare(command_writer);
+
+   /* Split into chunks of at most TERAKAN_CP_DMA_MAX_BYTE_COUNT bytes. Each chunk is one CP_DMA
+    * packet with SRC_SEL=DATA (the 32-bit constant goes in the SRC_ADDR_LO slot).
+    */
+   VkDeviceSize size_remaining = size;
+   uint64_t current_dst_va = dst_va;
+   while (size_remaining != 0) {
+      uint32_t const command_fill_size =
+         (uint32_t)MIN2(size_remaining, TERAKAN_CP_DMA_MAX_BYTE_COUNT);
+      uint32_t * packet = terakan_gfx_command_writer_emit_with_bo(command_writer, 6, false, 1, 0, 1);
+      if (unlikely(packet == NULL)) {
+         return;
+      }
+      *packet++ = PKT3(PKT3_CP_DMA, 5 - 1, 0);
+      /* SRC_ADDR_LO slot: 32-bit data constant. */
+      *packet++ = clear_value;
+      /* SRC_ADDR_HI slot: SRC_SEL=DATA (2). */
+      *packet++ = PKT3_CP_DMA_SRC_SEL(2);
+      uint32_t const * const packet_dst = packet;
+      *packet++ = (uint32_t)current_dst_va;
+      *packet++ = (current_dst_va >> 32) & 0xFF;
+      *packet++ = command_fill_size;
+      terakan_gfx_command_writer_add_relocation_for_40_bits(
+         command_writer, &packet, packet_dst, packet_dst + 1,
+         TERASCALE_WDDM_PATCH_IDS_CP_DMA_DST_LO, TERASCALE_WDDM_PATCH_IDS_CP_DMA_DST_HI,
+         terakan_bo_reference_writer_add_reference(&command_writer->base.bo_reference_writer, dst_bo,
+                                                   false, true, dst_bo_priority));
+      terakan_gfx_command_writer_emit_done(command_writer, packet);
+      current_dst_va += command_fill_size;
+      size_remaining -= command_fill_size;
+   }
+}
+
 VKAPI_ATTR void VKAPI_CALL
 terakan_CmdCopyBuffer2(VkCommandBuffer const commandBuffer,
                        VkCopyBufferInfo2 const * const pCopyBufferInfo)
@@ -247,4 +290,29 @@ terakan_CmdUpdateBuffer(VkCommandBuffer const commandBuffer, VkBuffer const dstB
       TERAKAN_BARRIER_ACTION_SYNC_ME_TO_CP_DMA;
    terakan_cp_dma_copy(command_writer, src_bo, src_va, TERAKAN_BO_PRIORITY_CP_DMA, dst_buffer->bo,
                        dst_buffer->va + dstOffset, TERAKAN_BO_PRIORITY_CP_DMA, dataSize);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+terakan_CmdFillBuffer(VkCommandBuffer const commandBuffer, VkBuffer const dstBuffer,
+                      VkDeviceSize const dstOffset, VkDeviceSize const size, uint32_t const data)
+{
+   struct terakan_gfx_command_writer * const command_writer =
+      terakan_command_buffer_from_handle(commandBuffer)->command_writer.gfx;
+   struct terakan_buffer const * const dst_buffer = terakan_buffer_from_handle(dstBuffer);
+
+   /* Per VUID-vkCmdFillBuffer-dstOffset-00025 / size-00026, dstOffset is 4-byte aligned and a
+    * non-VK_WHOLE_SIZE size is 4-byte aligned. For VK_WHOLE_SIZE, the spec rounds the fill length
+    * down to the nearest multiple of 4 — mask off the low two bits unconditionally so both paths
+    * stay 4-aligned (the CP DMA fill primitive asserts 4-byte alignment).
+    */
+   VkDeviceSize const fill_size =
+      vk_buffer_range(&dst_buffer->vk, dstOffset, size) & ~(VkDeviceSize)3;
+   if (fill_size == 0) {
+      return;
+   }
+
+   command_writer->post_buffer_copy_write_barrier_actions |=
+      TERAKAN_BARRIER_ACTION_SYNC_ME_TO_CP_DMA;
+   terakan_cp_dma_fill(command_writer, dst_buffer->bo, dst_buffer->va + dstOffset,
+                       TERAKAN_BO_PRIORITY_CP_DMA, fill_size, data);
 }

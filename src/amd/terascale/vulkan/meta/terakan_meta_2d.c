@@ -450,7 +450,7 @@ struct terakan_meta_shader const terakan_meta_position_and_layer_from_index_vs =
 
 void
 terakan_meta_begin_2d(struct terakan_gfx_command_writer * const command_writer,
-                      uint32_t const pa_cl_vte_cntl)
+                      uint32_t const pa_cl_vte_cntl, uint32_t const num_samples_log2)
 {
    terakan_meta_modify_state_draw_dword(command_writer, TERAKAN_STATE_DRAW_INDEX_PA_CL_CLIP_CNTL,
                                         TERAKAN_HW_STATE_DRAW_INDEX_PA_CL_CLIP_CNTL,
@@ -463,8 +463,14 @@ terakan_meta_begin_2d(struct terakan_gfx_command_writer * const command_writer,
 
    terakan_meta_set_pa_cl_vte_cntl(command_writer, pa_cl_vte_cntl);
 
-   uint32_t const num_samples_log2 = 0;
-   /* TODO(Triang3l): Make what depends on the sample count pending in state_draw. */
+   /* The MSAA sample count is parameterized because CB_RESOLVE requires the source MSAA attachment
+    * to be bound at its native sample count (the fixed-function averager in the CB reads individual
+    * sample slots). All non-resolve meta passes (clear, copy, 3x expand) pass 0 — they render
+    * single-sample output into a single-sample destination.
+    * `assert(num_samples_log2 <= (is_r9xx ? 4 : 3))` is enforced by
+    * terakan_hw_state_draw_emit_pa_sc_aa_samples (asserts 1x/2x/4x on R8xx, up to 8x on R9xx).
+    */
+   assert(num_samples_log2 <= 4);
 
    terakan_meta_modify_state_draw_dword(command_writer, TERAKAN_STATE_DRAW_INDEX_PA_SC_MODE_CNTL_0,
                                         TERAKAN_HW_STATE_DRAW_INDEX_PA_SC_MODE_CNTL_0,

@@ -674,6 +674,27 @@ terakan_pipeline_graphics_vertex_input_init(struct terakan_pipeline_graphics * c
             BITSET_SET(pipeline->static_state,
                        TERAKAN_PIPELINE_GRAPHICS_STATE_SQ_PGM_FS_2048_STRIDE_WORKAROUND);
          }
+
+         /* The 2048-stride workaround (see terakan_vertex_input.c:253-323) requires R0.Z to carry
+          * the base-instance value for any per-instance binding at stride 2048, because the fetch
+          * shader synthesises the instanced fetch index as `instance_id * 2 + R0.Z` (divisor 1),
+          * `(instance_id / divisor) * 2 + R0.Z` (divisor >1), or just `R0.Z` (divisor 0). SFN does
+          * not currently emit the `MOV R0.Z, base_instance` preamble (base_instance reaches shaders
+          * through the draw-parameters CB, not pinned to R0.Z — see sfn_shader_vs.cpp:530-533). The
+          * per-vertex path of the workaround is sound; only per-instance bindings at 2048 trip.
+          * Until the SFN preamble lands (option (a) at terakan_physical_device.c), reject such
+          * pipelines so the driver never silently returns wrong fetches.
+          */
+         if (fs_state->bindings_with_2048_stride_workaround & fs_state->instance_bindings) {
+            return vk_errorf(device, VK_ERROR_INITIALIZATION_FAILED,
+                             "Pipeline uses a per-instance vertex binding at stride 2048 on R8xx, "
+                             "which is unsupported: base-instance cannot be routed into the "
+                             "fetch-shader 2048-stride workaround without an SFN preamble (see "
+                             "terakan_physical_device.c TODO at maxVertexInputBindingStride). "
+                             "Instance bindings: 0x%" PRIx32 ", 2048-stride bindings: 0x%" PRIx32,
+                             fs_state->instance_bindings,
+                             fs_state->bindings_with_2048_stride_workaround);
+         }
       }
 
       /* If attributes_needed_by_vs is NULL, this is a pipeline library with a vertex input state,
@@ -696,7 +717,10 @@ terakan_pipeline_graphics_vertex_input_init(struct terakan_pipeline_graphics * c
             fs_state->instance_bindings, fs_state->instance_binding_divisors,
             fs_state->bindings_with_2048_stride_workaround, &fs_alu_qword_count, fs_alu,
             &fs_alu_clause_count, fs_alu_clause_qwords, &fs_fetch_count, fs_fetch);
-         /* TODO(Triang3l): Suballocate the fetch shader as well as other shaders. */
+         /* Fetch shader is allocated as a dedicated BO rather than suballocated from a pool. This
+          * tracks the shared parent decision at `terakan_shader.h` for application shaders —
+          * suballocation is a GPU-memory-fragmentation optimization, not a v1.0 correctness gap.
+          */
          result = device->winsys_fn->bo->allocate_device_memory(
             device,
             terakan_vertex_input_fs_byte_count(fs_alu_qword_count, fs_alu_clause_count,
@@ -1150,10 +1174,15 @@ terakan_pipeline_graphics_create(struct terakan_device * const device,
 
       terakan_shader_lower_and_optimize_post_link(nir, pipeline_layout, shader->resources_needed,
                                                   &shader->samplers_needed,
+                                                  &shader->push_constants_usage.driver_constants,
                                                   &shader->fs.fragment_data_uncompacted_locations);
 
-      /* TODO(Triang3l): Construct the shader key from the NIR and, when available, the pipeline
-       * state.
+      /* Shader key is intentionally minimal. Most `union r600_shader_key` fields gate fixed-function
+       * GL features (alpha test, user clip planes driven by a gallium rasterizer state, two-sided
+       * stencil toggles) that Vulkan 1.0 either does not expose or expresses as shader-visible
+       * SPIR-V capabilities — handled by NIR rather than by a shader-compile key. `ps.nr_cbufs`
+       * stays plumbed because SFN's fragment export packing depends on it. Post-v1.0 feature
+       * exposure (e.g. transform feedback, VK_EXT_depth_clip_control) can add keyed variants here.
        */
       union r600_shader_key shader_key = {};
       if (stage_index == MESA_SHADER_FRAGMENT) {
@@ -1173,8 +1202,10 @@ terakan_pipeline_graphics_create(struct terakan_device * const device,
    /* Vertex shader is mandatory if the pre-rasterization part is present. Fail to create the
     * pipeline to let other places in the pipeline code assume this more consistently.
     */
-   /* TODO(Triang3l): Don't do this for graphics pipeline libraries without the pre-rasterization
-    * part.
+   /* VS-mandatory check runs unconditionally. VK_EXT_graphics_pipeline_library (which permits
+    * omitting the pre-rasterization stage from a library pipeline) is not a Vulkan 1.0 feature and
+    * is not advertised by this ICD, so the no-pre-raster library case cannot reach this path.
+    * Revisit when graphics pipeline libraries are exposed.
     */
    assert(pipeline->shader_stages & VK_SHADER_STAGE_VERTEX_BIT);
    if (unlikely(!(pipeline->shader_stages & VK_SHADER_STAGE_VERTEX_BIT))) {

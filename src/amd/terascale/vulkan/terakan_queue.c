@@ -224,7 +224,18 @@ terakan_queue_get_graphics_signal_indirect_buffer(
 
    /* VK_PIPELINE_STAGE_2_COPY_BIT is flushed in command buffer ending. */
 
-   /* TODO(Triang3l): VK_PIPELINE_STAGE_2_CLEAR_BIT. */
+   /* VK_PIPELINE_STAGE_2_CLEAR_BIT needs no explicit drain here:
+    *   - CmdFillBuffer / CmdUpdateBuffer go through CP DMA, drained by the per-command-buffer
+    *     CP DMA sync at command buffer end.
+    *   - CmdClearColorImage writes through CB via the meta clear draw. The CB flush
+    *     (FLUSH_INV_CB_RTV_DATA + PARTIAL_FLUSH_CP_THROUGH_PS) is accumulated into
+    *     post_color_image_copy_write_barrier_actions and lifted into pending_barrier_actions by
+    *     terakan_EndCommandBuffer, so the flush is emitted inside the CB's own IB — before the
+    *     signal IB runs. CmdClearDepthStencilImage, when implemented, will follow the same shape
+    *     against post_depth_stencil_image_copy_write_barrier_actions.
+    * In both cases, by the time the signal fence packet is reached, the writes are already
+    * visible to the fence's completion domain.
+    */
 
    cp_coher_cntl |= cp_coher_cntl_cb_db_dest_base_ena;
    if (cp_coher_cntl) {

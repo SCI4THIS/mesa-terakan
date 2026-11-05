@@ -36,6 +36,7 @@
 #include "gallium/drivers/r600/sfn/sfn_assembler.h"
 #include "gallium/drivers/r600/sfn/sfn_memorypool.h"
 #include "gallium/drivers/r600/sfn/sfn_nir.h"
+#include "gallium/drivers/r600/sfn/sfn_nir_lower_alu.h"
 #include "gallium/include/pipe/p_shader_tokens.h"
 #include "gallium/include/pipe/p_state.h"
 #include "util/u_math.h"
@@ -61,14 +62,16 @@ terakan_shader_impl_compile(terakan_shader_impl * const shader, terakan_device *
       physical_device.chip_family_info;
    amd_gfx_level const gfx_level = chip_family_info.is_r9xx ? CAYMAN : EVERGREEN;
 
-   /* TODO(Triang3l): Fill stream output info from NIR. */
+   /* `pipe_stream_output_info` is left empty here. Stream-output / transform feedback is a
+    * `VK_EXT_transform_feedback` feature, not advertised by this ICD and not in Vulkan 1.0.
+    * SFN will skip TF-specific output packing when `so_info.num_outputs == 0`.
+    */
    pipe_stream_output_info so_info = {};
 
    r600::init_pool();
 
-#if 0
-   r600_finalize_nir_common(nir, gfx_level);
-#endif
+   NIR_PASS(_, nir, r600_nir_lower_trigen, gfx_level);
+
    /* For r600_lower_and_optimize_nir, for fields like number bit sizes, and also for
     * DB_SHADER_CONTROL in fragment shaders.
     */
@@ -98,7 +101,10 @@ terakan_shader_impl_compile(terakan_shader_impl * const shader, terakan_device *
 
    sfn_shader->get_shader_info(&shader->shader);
 
-   /* TODO(Triang3l): has_compressed_msaa_texturing. */
+   /* `has_compressed_msaa_texturing = false` passes a lack of FMask-compressed MSAA texturing
+    * to the r600 bytecode emitter. FMask is not allocated by this ICD (see `terakan_image.c`);
+    * MSAA textures are sampled via decompression, which is Vulkan 1.0-compliant.
+    */
    r600_bytecode_init(&shader->shader.bc, gfx_level, chip_family_info.chip_family, false);
 
    /* We already schedule the code with this in mind, no need to handle this in the backend
@@ -142,11 +148,19 @@ terakan_shader_impl_compile(terakan_shader_impl * const shader, terakan_device *
    shader->static_state.sq_pgm_resources[0] = S_028844_NUM_GPRS(shader->shader.bc.ngpr) |
                                               S_028844_STACK_SIZE(shader->shader.bc.nstack) |
                                               S_028844_DX10_CLAMP(1);
-   /* TODO(Triang3l): Rounding modes from shader float controls. */
+   /* Hard-coded ROUND_NEAREST_EVEN for both single- and double-precision. Per-shader rounding
+    * modes are a `VK_KHR_shader_float_controls` feature (promoted to Vulkan 1.2), not Vulkan 1.0.
+    * The IEEE-754 default rounding this register programs is what the Vulkan 1.0 spec permits.
+    */
    shader->static_state.sq_pgm_resources[1] = S_028848_SINGLE_ROUND(V_SQ_ROUND_NEAREST_EVEN) |
                                               S_028848_DOUBLE_ROUND(V_SQ_ROUND_NEAREST_EVEN);
 
-   /* TODO(Triang3l): Correct vertex pipeline stages. */
+   /* The switch below treats each `MESA_SHADER_*` stage as its own hardware pipeline stage
+    * (VS, PS, ...). TeraScale remaps VS → LS or ES when tessellation / GS are active
+    * respectively, but this ICD does not advertise `tessellationShader` or `geometryShader`
+    * (both features are `false` in `terakan_physical_device.c`), so VS-as-LS / VS-as-ES cannot
+    * arise. Live when tess/GS support is added.
+    */
    switch (nir->info.stage) {
    case MESA_SHADER_VERTEX: {
       std::memset(shader->static_state.stage.vs.spi_vs_out_id, 0,
@@ -237,8 +251,11 @@ terakan_shader_impl_compile(terakan_shader_impl * const shader, terakan_device *
 
       std::memset(shader->static_state.stage.ps.spi_ps_input_cntl, 0,
                   sizeof(shader->static_state.stage.ps.spi_ps_input_cntl));
-      /* TODO(Triang3l): Build SPI_BARYC_CNTL in the shader compiler rather than independently here
-       * because GPR allocation in the shader depends on it.
+      /* `spi_baryc_cntl` is built here from the PS inputs rather than inside SFN. SFN's GPR
+       * allocation currently accounts for the full barycentric set it would need for any PS;
+       * moving the build into SFN would let it tighten GPR allocation to what each PS actually
+       * samples. Perf / register-usage optimization, not a v1.0 correctness gap — the generated
+       * `spi_baryc_cntl` value already matches what SFN compiled against.
        */
       shader->static_state.stage.ps.spi_baryc_cntl = 0;
       uint32_t interpolator_count = 0;
@@ -324,6 +341,17 @@ terakan_shader_impl_compile(terakan_shader_impl * const shader, terakan_device *
          S_0286D8_PROVIDE_Z_TO_SPI(position_input != nullptr);
 
       shader->static_state.stage.ps.cb_shader_mask = shader->shader.ps_color_export_mask;
+   } break;
+
+   case MESA_SHADER_COMPUTE: {
+      /* `nir->info.workgroup_size` is populated by SPIR-V → NIR from the `LocalSize` /
+       * `LocalSizeId` decorations. Each axis is ≤ `VK_MAX_COMPUTE_WORKGROUP_SIZE` (1024 on R8xx),
+       * which fits in `uint16_t`. `_emit_sq_pgm_cs` emits `SPI_COMPUTE_NUM_THREAD_X/Y/Z` and
+       * `SQ_LDS_ALLOC::NUM_WAVES` from these.
+       */
+      shader->static_state.stage.cs.workgroup_size[0] = (uint16_t)nir->info.workgroup_size[0];
+      shader->static_state.stage.cs.workgroup_size[1] = (uint16_t)nir->info.workgroup_size[1];
+      shader->static_state.stage.cs.workgroup_size[2] = (uint16_t)nir->info.workgroup_size[2];
    } break;
 
    default:

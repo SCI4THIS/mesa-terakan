@@ -74,6 +74,14 @@ struct terakan_device {
    struct terakan_bo * meta_shaders_bo;
    struct terakan_shader_static meta_shaders[TERAKAN_META_SHADER_COUNT];
 
+   /* OCCLUSION `vkCmdCopyQueryPoolResults` reduction compute shader. Built
+    * eagerly at device creation (see `terakan_device_query_copy_shader_init`)
+    * — the compile is cheap and amortizes nothing worth deferring. Its
+    * `static_state.program_bo` is owned by this field, not pooled with
+    * `meta_shaders_bo`.
+    */
+   struct terakan_shader_impl query_copy_shader;
+
    /* Uses a program from meta_shaders_bo. */
    struct terakan_vertex_input_static_state empty_vertex_input;
 

@@ -341,6 +341,15 @@ terascale_wddm_create_context_private_data_clear(
 #define TERASCALE_WDDM_PATCH_IDS_EVENT_WRITE_EOP_LO TERASCALE_WDDM_PATCH_IDS_40_BIT_LO(0x3F)
 #define TERASCALE_WDDM_PATCH_IDS_EVENT_WRITE_EOP_HI TERASCALE_WDDM_PATCH_IDS_40_BIT_HI(0x67)
 
+/* WAIT_REG_MEM has no observed WDDM patch IDs; using placeholder slot IDs 0x40/0x68 that do not
+ * collide with any known slot. On DRM Radeon the kernel-mode driver uses one relocation covering
+ * the full 40-bit address and ignores the WDDM slot ID (see
+ * terakan_gfx_command_writer_add_relocation_for_40_bits), so these values are purely a formality
+ * on Linux; the WDDM fallback path would need the real IDs if it were ever used for query waits.
+ */
+#define TERASCALE_WDDM_PATCH_IDS_WAIT_REG_MEM_LO TERASCALE_WDDM_PATCH_IDS_40_BIT_LO(0x40)
+#define TERASCALE_WDDM_PATCH_IDS_WAIT_REG_MEM_HI TERASCALE_WDDM_PATCH_IDS_40_BIT_HI(0x68)
+
 /* Same as for EVENT_WRITE. */
 #define TERASCALE_WDDM_PATCH_IDS_SET_BASE_LO TERASCALE_WDDM_PATCH_IDS_40_BIT_LO(0x3E)
 #define TERASCALE_WDDM_PATCH_IDS_SET_BASE_HI TERASCALE_WDDM_PATCH_IDS_40_BIT_HI(0x66)

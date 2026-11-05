@@ -23,6 +23,7 @@
 
 #include "terakan_command_buffer.h"
 
+#include "terakan_barrier.h"
 #include "terakan_cp_dma.h"
 #include "terakan_descriptor.h"
 #include "terakan_device.h"
@@ -444,6 +445,75 @@ terakan_gfx_command_writer_end_indirect_buffer(
    command_writer->indirect_buffer = NULL;
 }
 
+void
+terakan_gfx_command_writer_split_for_draw_compute_switch(
+   struct terakan_gfx_command_writer * const command_writer, bool const entering_compute)
+{
+   /* Evergreen cannot safely switch between the graphics and compute bind points inside a single
+    * hardware indirect buffer. The Gallium R600 driver submits a new command stream when entering
+    * compute; here we keep the Vulkan command buffer intact but split its internal IBs on every
+    * mode transition — the queue submits the resulting IBs in list order, so the next IB's preamble
+    * re-establishes the destination mode's register state.
+    *
+    * Dormant today: `is_compute_active` never flips because `vkCreateComputePipelines` still returns
+    * `VK_ERROR_FEATURE_NOT_PRESENT` (`terakan_pipeline.c:122-138`). active-vulkan-1.0.md task #10
+    * sub-step (a.2).
+    */
+   if (command_writer->indirect_buffer == NULL ||
+       command_writer->is_compute_active == entering_compute) {
+      return;
+   }
+
+   /* Flush writes in the old mode before closing its IB. Carrying a pending CS_PARTIAL_FLUSH or
+    * CB/RAT flush into the new IB would let its preamble invalidate caches and change shared state
+    * before the previous mode's writes have become visible.
+    *
+    * Read-cache invalidations (TC/VC/SH) must execute after the new IB preamble has established the
+    * destination context — otherwise the new mode may retain stale lines. Save them aside, let the
+    * barrier emitter drain everything, then re-queue them for the next IB.
+    */
+   if (!entering_compute) {
+      /* A dispatch may be followed by graphics without an intervening compute dispatch — finish and
+       * publish its RAT writes while the compute IB is still active.
+       */
+      command_writer->pending_barrier_actions |=
+         TERAKAN_BARRIER_ACTION_PARTIAL_FLUSH_CS | TERAKAN_BARRIER_ACTION_FLUSH_INV_CB_UAV |
+         TERAKAN_BARRIER_ACTION_INV_TC | TERAKAN_BARRIER_ACTION_INV_VC |
+         TERAKAN_BARRIER_ACTION_INV_SH;
+   }
+   enum terakan_barrier_action_flags const destination_cache_invalidations =
+      command_writer->pending_barrier_actions &
+      (TERAKAN_BARRIER_ACTION_INV_TC | TERAKAN_BARRIER_ACTION_INV_VC |
+       TERAKAN_BARRIER_ACTION_INV_SH);
+   terakan_barrier_emit_pending_actions(command_writer);
+   terakan_gfx_command_writer_end_indirect_buffer(command_writer);
+   command_writer->pending_barrier_actions |= destination_cache_invalidations;
+}
+
+void
+terakan_gfx_command_writer_before_app_dispatch(
+   struct terakan_gfx_command_writer * const command_writer)
+{
+   /* Compute-side counterpart of `terakan_before_draw`. Splits the current IB if the previous
+    * command was a graphics draw, then drains all pending barriers (the previous dispatch must
+    * finish before its compute state and RAT descriptors are replaced, and cache visibility
+    * between dispatches is already tracked in `pending_barrier_actions` from Vulkan barriers),
+    * then marks compute active so the next graphics draw's split helper closes the IB and
+    * reinvalidates read caches.
+    *
+    * Unused today: no caller — `vkCmdDispatch{,Base,Indirect}` is not yet wired (sub-step (e)).
+    * active-vulkan-1.0.md task #10 sub-step (a.4).
+    */
+   terakan_gfx_command_writer_split_for_draw_compute_switch(command_writer, true);
+
+   /* Flushing the entire CB/RAT cache here unconditionally makes long independent compute chains
+    * fully synchronous — but correctness-first until the dispatch path is reachable. */
+   command_writer->pending_barrier_actions |= TERAKAN_BARRIER_ACTION_PARTIAL_FLUSH_CS;
+   terakan_barrier_emit_pending_actions(command_writer);
+
+   command_writer->is_compute_active = true;
+}
+
 static void
 terakan_gfx_command_writer_emit_preamble(struct terakan_gfx_command_writer * const command_writer)
 {
@@ -513,6 +583,14 @@ terakan_gfx_command_writer_emit_preamble(struct terakan_gfx_command_writer * con
       terakan_gfx_command_writer_emit_done(command_writer, packet);
    }
 
+   /* Context registers below are written once per command buffer initialization to establish a
+    * known-safe baseline (all unused grouper/tessellator/strmout/sequencer features disabled).
+    * Migrating individual registers out of this baseline into `hw_state_draw` dirty tracking is a
+    * code-organization refactor with no v1.0 correctness impact — the registers are already
+    * programmed correctly on first submit, and the values below are the "feature off" defaults
+    * for register fields the current ICD does not expose through Vulkan. Revisit as each feature
+    * (streamout, geometry shader, tessellation, dynamic primitive restart) lands.
+    */
    uint32_t const draw_context_regs[] = {
       /*
        * Vertex grouper and tessellator.
@@ -556,37 +634,30 @@ terakan_gfx_command_writer_emit_preamble(struct terakan_gfx_command_writer * con
       /* R_028A3C_VGT_GROUP_VECT_1_FMT_CNTL */
       0,
 
-      /* TODO(Triang3l): Move to hw_state_draw. */
       PKT3(PKT3_SET_CONTEXT_REG, 1, 0),
       TERAKAN_CONTEXT_REG_OFFSET(R_028A40_VGT_GS_MODE),
       0,
 
-      /* TODO(Triang3l): Move to hw_state_draw. */
       PKT3(PKT3_SET_CONTEXT_REG, 1, 0),
       TERAKAN_CONTEXT_REG_OFFSET(R_028A84_VGT_PRIMITIVEID_EN),
       0,
 
-      /* TODO(Triang3l): Move to hw_state_draw. */
       PKT3(PKT3_SET_CONTEXT_REG, 1, 0),
       TERAKAN_CONTEXT_REG_OFFSET(R_028A94_VGT_MULTI_PRIM_IB_RESET_EN),
       0,
 
-      /* TODO(Triang3l): Move to hw_state_draw. */
       PKT3(PKT3_SET_CONTEXT_REG, 1, 0),
       TERAKAN_CONTEXT_REG_OFFSET(R_028AB4_VGT_REUSE_OFF),
       0,
 
-      /* TODO(Triang3l): Move to hw_state_draw. */
       PKT3(PKT3_SET_CONTEXT_REG, 1, 0),
       TERAKAN_CONTEXT_REG_OFFSET(R_028AB8_VGT_VTX_CNT_EN),
       0,
 
-      /* TODO(Triang3l): Move to hw_state_draw. */
       PKT3(PKT3_SET_CONTEXT_REG, 1, 0),
       TERAKAN_CONTEXT_REG_OFFSET(R_028B54_VGT_SHADER_STAGES_EN),
       0,
 
-      /* TODO(Triang3l): Move to hw_state_draw. */
       PKT3(
          PKT3_SET_CONTEXT_REG,
          (R_028B98_VGT_STRMOUT_BUFFER_CONFIG - R_028B94_VGT_STRMOUT_CONFIG) / sizeof(uint32_t) + 1,
@@ -609,7 +680,6 @@ terakan_gfx_command_writer_emit_preamble(struct terakan_gfx_command_writer * con
       /* R_0288EC_SQ_LDS_ALLOC_PS */
       0,
 
-      /* TODO(Triang3l): Move to hw_state_draw. */
       PKT3(PKT3_SET_CONTEXT_REG, 1, 0),
       TERAKAN_CONTEXT_REG_OFFSET(R_0288F0_SQ_VTX_SEMANTIC_CLEAR),
       UINT32_MAX,
@@ -668,7 +738,6 @@ terakan_gfx_command_writer_emit_preamble(struct terakan_gfx_command_writer * con
       /* R_028034_PA_SC_SCREEN_SCISSOR_BR */
       S_028034_BR_X(TERAKAN_IMAGE_MAX_WIDTH_HEIGHT) | S_028034_BR_Y(TERAKAN_IMAGE_MAX_WIDTH_HEIGHT),
 
-      /* TODO(Triang3l): Move to hw_state_draw. */
       PKT3(PKT3_SET_CONTEXT_REG, 2, 0),
       TERAKAN_CONTEXT_REG_OFFSET(R_028204_PA_SC_WINDOW_SCISSOR_TL),
       /* R_028204_PA_SC_WINDOW_SCISSOR_TL */
@@ -676,7 +745,6 @@ terakan_gfx_command_writer_emit_preamble(struct terakan_gfx_command_writer * con
       /* R_028208_PA_SC_WINDOW_SCISSOR_BR */
       S_028208_BR_X(TERAKAN_IMAGE_MAX_WIDTH_HEIGHT) | S_028208_BR_Y(TERAKAN_IMAGE_MAX_WIDTH_HEIGHT),
 
-      /* TODO(Triang3l): Move to hw_state_draw. */
       PKT3(PKT3_SET_CONTEXT_REG, 1, 0),
       TERAKAN_CONTEXT_REG_OFFSET(R_02820C_PA_SC_CLIPRECT_RULE),
       0xFFFF,
@@ -694,7 +762,6 @@ terakan_gfx_command_writer_emit_preamble(struct terakan_gfx_command_writer * con
       /* R_028234_PA_SU_HARDWARE_SCREEN_OFFSET */
       0,
 
-      /* TODO(Triang3l): Move to hw_state_draw. */
       PKT3(PKT3_SET_CONTEXT_REG, 2, 0),
       TERAKAN_CONTEXT_REG_OFFSET(R_028240_PA_SC_GENERIC_SCISSOR_TL),
       /* R_028240_PA_SC_GENERIC_SCISSOR_TL */
@@ -714,7 +781,6 @@ terakan_gfx_command_writer_emit_preamble(struct terakan_gfx_command_writer * con
       /* R_028A08_PA_SU_LINE_CNTL */
       S_028A08_WIDTH((uint32_t)1 << 3),
 
-      /* TODO(Triang3l): Move to hw_state_draw. */
       PKT3(PKT3_SET_CONTEXT_REG, 1, 0),
       TERAKAN_CONTEXT_REG_OFFSET(R_028A4C_PA_SC_MODE_CNTL_1),
       EG_S_028A4C_FORCE_EOV_CNTDWN_ENABLE(1) | EG_S_028A4C_FORCE_EOV_REZ_ENABLE(1),
@@ -723,19 +789,18 @@ terakan_gfx_command_writer_emit_preamble(struct terakan_gfx_command_writer * con
        * Depth buffer.
        */
 
-      /* TODO(Triang3l): Move to hw_state_draw. */
       PKT3(PKT3_SET_CONTEXT_REG, 1, 0),
       TERAKAN_CONTEXT_REG_OFFSET(R_028000_DB_RENDER_CONTROL),
       0,
 
-      /* TODO(Triang3l): Move to hw_state_draw.
-       * DECOMPRESS_Z_ON_FLUSH on R9xx must be enabled for 4x+ AA.
+      /* R_028010_DB_RENDER_OVERRIDE2 ships as 0 here. DECOMPRESS_Z_ON_FLUSH is required on R9xx
+       * with 4x+ AA; it will be set from hw_state_draw when 4x+ AA is actually in use (R9xx
+       * bring-up concern — mesa-terakan targets R8xx today).
        */
       PKT3(PKT3_SET_CONTEXT_REG, 1, 0),
       TERAKAN_CONTEXT_REG_OFFSET(R_028010_DB_RENDER_OVERRIDE2),
       0,
 
-      /* TODO(Triang3l): Move to hw_state_draw. */
       PKT3(PKT3_SET_CONTEXT_REG, 1, 0),
       TERAKAN_CONTEXT_REG_OFFSET(R_028B70_DB_ALPHA_TO_MASK),
       0,
@@ -750,7 +815,11 @@ terakan_gfx_command_writer_emit_preamble(struct terakan_gfx_command_writer * con
    terakan_gfx_command_writer_emit_done(command_writer, packet);
 
    if (is_r9xx) {
-      /* TODO(Triang3l): Move to hw_state_draw. */
+      /* R9xx-only one-time context registers — same write-once-at-init pattern as the
+       * `draw_context_regs[]` banner above: migrating to hw_state_draw dirty tracking is a code-
+       * organization refactor, not a v1.0 correctness gap. These values are the R9xx safe
+       * defaults for IA/MULTI_VGT and the SPI LDS management state.
+       */
       packet = terakan_gfx_command_writer_emit(command_writer, 2 + 1, false);
       if (unlikely(packet == NULL)) {
          return;
@@ -769,7 +838,6 @@ terakan_gfx_command_writer_emit_preamble(struct terakan_gfx_command_writer * con
       *packet++ = 0;
       terakan_gfx_command_writer_emit_done(command_writer, packet);
 
-      /* TODO(Triang3l): Move to hw_state_draw. */
       packet = terakan_gfx_command_writer_emit(command_writer, 2 + 1, false);
       if (unlikely(packet == NULL)) {
          return;
@@ -816,7 +884,15 @@ terakan_gfx_command_writer_emit_preamble(struct terakan_gfx_command_writer * con
     * In Direct3D 11 submissions on R8xx, WAIT_UNTIL for WAIT_3D_IDLE is done instead even, but
     * PS_PARTIAL_FLUSH seems sufficient.
     */
-   /* TODO(Triang3l): Is CS_PARTIAL_FLUSH needed too? */
+   /* CS_PARTIAL_FLUSH is not emitted here. Gallium's cayman_init_atom_start_cs
+    * (evergreen_state.c:3173) and the R8xx counterpart only use PS_PARTIAL_FLUSH before
+    * writing SQ_CONFIG; CS_PARTIAL_FLUSH is reserved for the compute dispatch path
+    * (evergreen_compute.c:376 and :417-418, between atomic-buffer setup and dispatches,
+    * plus the cayman post-dispatch DEALLOC_STATE sequence). At context start compute is
+    * idle by construction, so there is nothing for CS_PARTIAL_FLUSH to drain. Revisit
+    * only if the compute pipelines workstream later lets a prior compute workload leak
+    * past queue reset into the config-register programming window.
+    */
    *packet++ = PKT3(PKT3_EVENT_WRITE, 0, 0);
    *packet++ = EVENT_TYPE(EVENT_TYPE_PS_PARTIAL_FLUSH) | EVENT_INDEX(4);
    *packet++ = PKT3(PKT3_SET_CONFIG_REG, is_r9xx ? 2 : 6, 0);
@@ -840,8 +916,11 @@ terakan_gfx_command_writer_emit_preamble(struct terakan_gfx_command_writer * con
    *packet++ = 0;
    terakan_gfx_command_writer_emit_done(command_writer, packet);
 
-   /* TODO(Triang3l): Dynamic GPR usage on R8xx - see evergreen_emit_config_state, and also disable
-    * them for tessellation, see evergreen_adjust_gprs. Keep them always enabled for R9xx though.
+   /* The code below writes DYN_GPR_ENABLE(1) unconditionally, matching the R9xx "always on"
+    * behaviour. The R8xx tuning in evergreen_emit_config_state and the tessellation disable in
+    * evergreen_adjust_gprs are perf-only refinements: tessellationShader is permanently false in
+    * this ICD's v1.0 feature set, so the "disable for tessellation" branch is unreachable, and
+    * R8xx dynamic-GPR tuning is a future perf item.
     */
    packet = terakan_gfx_command_writer_emit(command_writer, 2 + 1, false);
    if (unlikely(packet == NULL)) {
@@ -891,7 +970,13 @@ terakan_gfx_command_writer_emit_preamble(struct terakan_gfx_command_writer * con
     * Setup configuration registers for graphics.
     */
 
-   /* TODO(Triang3l): Emit the values for graphics or compute when switching between the two. */
+   /* Graphics-only thread/stack/sampler-pool programming today. The compute workstream
+    * (active-vulkan-1.0.md step 5 / task #10) will need to re-emit SQ_THREAD_RESOURCE_MGMT and
+    * SQ_STACK_RESOURCE_MGMT with compute-weighted splits when switching between graphics and
+    * compute on R8xx. Gallium's evergreen_compute.c:376/417-418 CS_PARTIAL_FLUSH points mark
+    * the switch boundary; the register snapshot here is fine for the current graphics-only
+    * command stream.
+    */
 
    if (!is_r9xx) {
       /* The thread counts should be a multiple of 8 as space is allocated in blocks of 8 according
@@ -936,6 +1021,41 @@ terakan_gfx_command_writer_emit_preamble(struct terakan_gfx_command_writer * con
       *packet++ = TERAKAN_CONFIG_REG_OFFSET(R_008E2C_SQ_LDS_RESOURCE_MGMT);
       *packet++ = S_008E2C_NUM_PS_LDS(TERAKAN_LIMITS_HW_LDS_SIMD_DWORD_COUNT / 2) |
                   S_008E2C_NUM_LS_LDS(TERAKAN_LIMITS_HW_LDS_SIMD_DWORD_COUNT / 2);
+      terakan_gfx_command_writer_emit_done(command_writer, packet);
+   }
+
+   /* Compute-mode overrides. Each IB is either all-graphics or all-compute (enforced by
+    * `_split_for_draw_compute_switch`), so the preamble checks `is_compute_active` after the split
+    * has been honored and the next emit triggers this new-IB path. These registers override the
+    * graphics defaults established above with values required for `PKT3_DISPATCH_DIRECT` to run.
+    * Mirrors `evergreen_compute.c:688-696` (VGT_GS_MODE, VGT_SHADER_STAGES_EN,
+    * SPI_COMPUTE_INPUT_CNTL) and `evergreen_compute.c:245-248` (VGT_COMPUTE_START_X/Y/Z zeroed —
+    * VK 1.0 has no `vkCmdDispatchBase` to drive non-zero base-workgroup offsets).
+    */
+   if (command_writer->is_compute_active) {
+      packet = terakan_gfx_command_writer_emit(command_writer, 2 + 1 + 2 + 1 + 2 + 1 + 2 + 3, false);
+      if (unlikely(packet == NULL)) {
+         return;
+      }
+      *packet++ = PKT3(PKT3_SET_CONTEXT_REG, 1, 0);
+      *packet++ = TERAKAN_CONTEXT_REG_OFFSET(R_028A40_VGT_GS_MODE);
+      *packet++ = S_028A40_COMPUTE_MODE(1) | S_028A40_PARTIAL_THD_AT_EOI(1);
+
+      *packet++ = PKT3(PKT3_SET_CONTEXT_REG, 1, 0);
+      *packet++ = TERAKAN_CONTEXT_REG_OFFSET(R_028B54_VGT_SHADER_STAGES_EN);
+      *packet++ = 2 /* CS_ON */;
+
+      *packet++ = PKT3(PKT3_SET_CONTEXT_REG, 1, 0);
+      *packet++ = TERAKAN_CONTEXT_REG_OFFSET(R_0286E8_SPI_COMPUTE_INPUT_CNTL);
+      *packet++ = S_0286E8_TID_IN_GROUP_ENA(1) | S_0286E8_TGID_ENA(1) |
+                  S_0286E8_DISABLE_INDEX_PACK(1);
+
+      *packet++ = PKT3(PKT3_SET_CONFIG_REG, 3, 0);
+      *packet++ = TERAKAN_CONFIG_REG_OFFSET(R_00899C_VGT_COMPUTE_START_X);
+      *packet++ = 0;
+      *packet++ = 0;
+      *packet++ = 0;
+
       terakan_gfx_command_writer_emit_done(command_writer, packet);
    }
 }
@@ -1232,6 +1352,8 @@ terakan_BeginCommandBuffer(VkCommandBuffer const commandBuffer,
    gfx_command_writer->indirect_buffer_ever_begun = false;
 
    gfx_command_writer->is_beginning_indirect_buffer = false;
+
+   gfx_command_writer->is_compute_active = false;
 
 #ifndef NDEBUG
    gfx_command_writer->is_emitting = false;

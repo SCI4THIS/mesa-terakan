@@ -133,7 +133,19 @@ terakan_push_constants_apply(struct terakan_gfx_command_writer * const command_w
          TERAKAN_KCACHE_HW_LINE_BYTES * (VkDeviceSize)state->allocation.va_kcache_lines,
          TERAKAN_KCACHE_HW_LINE_BYTES * state->allocation.size_kcache_lines, resource);
       if (is_compute) {
-         /* TODO(Triang3l): Bind to the compute stage. */
+         /* Mirrors the graphics branch below — single compute stage so no table loop; dispatches
+          * through the `_compute` scalar function-pointer globals installed in iter 43 (task #10
+          * sub-step (c.5)+(c.6)). Unreachable at runtime until `vkCreateComputePipelines` stops
+          * returning `VK_ERROR_FEATURE_NOT_PRESENT` (sub-steps (d)+(e)); the branch is scaffolded
+          * now so the compute path lights up end-to-end when the factory flips.
+          */
+         terakan_hw_state_draw_set_sq_kcache_compute(
+            &command_writer->hw_state_draw, TERAKAN_KCACHE_BUFFER_PUSH_CONSTANTS,
+            state->allocation.size_kcache_lines, state->allocation.bo,
+            state->allocation.va_kcache_lines);
+         terakan_hw_state_draw_set_sq_resource_compute(
+            &command_writer->hw_state_draw, TERAKAN_RESOURCE_RANGE_PUSH_CONSTANTS,
+            state->allocation.bo, resource);
       } else {
          unsigned remaining_stages = (unsigned)bind_to_stages;
          while (remaining_stages) {
@@ -150,4 +162,36 @@ terakan_push_constants_apply(struct terakan_gfx_command_writer * const command_w
       }
       state->up_to_date_push_constants_bound_to_stages |= bind_to_stages;
    }
+}
+
+void
+terakan_push_constants_set_num_workgroups(struct terakan_gfx_command_writer * const command_writer,
+                                          uint32_t const x, uint32_t const y, uint32_t const z)
+{
+   struct terakan_push_constants_state * const state = &command_writer->push_constants_state;
+   uint32_t const num_workgroups[3] = {x, y, z};
+   if (memcmp(state->driver_constants.num_workgroups, num_workgroups, sizeof(num_workgroups)) ==
+       0) {
+      return;
+   }
+
+   memcpy(state->driver_constants.num_workgroups, num_workgroups, sizeof(num_workgroups));
+   state->driver_constants_modified |=
+      BITFIELD_BIT(TERAKAN_PUSH_CONSTANT_DRIVER_INDEX_NUM_WORKGROUPS);
+}
+
+void
+terakan_push_constants_set_base_workgroup(struct terakan_gfx_command_writer * const command_writer,
+                                          uint32_t const x, uint32_t const y, uint32_t const z)
+{
+   struct terakan_push_constants_state * const state = &command_writer->push_constants_state;
+   uint32_t const base_workgroup[3] = {x, y, z};
+   if (memcmp(state->driver_constants.base_workgroup, base_workgroup, sizeof(base_workgroup)) ==
+       0) {
+      return;
+   }
+
+   memcpy(state->driver_constants.base_workgroup, base_workgroup, sizeof(base_workgroup));
+   state->driver_constants_modified |=
+      BITFIELD_BIT(TERAKAN_PUSH_CONSTANT_DRIVER_INDEX_BASE_WORKGROUP);
 }

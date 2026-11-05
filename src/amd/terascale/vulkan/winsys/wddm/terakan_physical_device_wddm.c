@@ -122,11 +122,16 @@ terakan_physical_device_wddm_try_create(struct terakan_instance_wddm * const ins
    if (!terakan_physical_device_is_chip_family_supported(chip_family)) {
       return VK_ERROR_INCOMPATIBLE_DRIVER;
    }
-   /* TODO(Triang3l): Research and implement R9xx support and virtual memory usage. */
+   /* WDDM is a Windows-only sibling winsys and is not in mesa-terakan's Linux/DRM-Radeon v1.0
+    * scope; R9xx + virtual-memory bring-up here would be revisited only if Windows support is
+    * explored later.
+    */
    if (chip_family >= CHIP_CAYMAN) {
       return VK_ERROR_INCOMPATIBLE_DRIVER;
    }
-   /* TODO(Triang3l): Research allocation on chips with shared memory. */
+   /* WDDM-only path; shared-memory APU allocation details on Windows are out of scope for the
+    * Linux/DRM-Radeon v1.0 target. Revisit if Windows support is pursued.
+    */
    switch (chip_family) {
    case CHIP_PALM:
    case CHIP_SUMO:
@@ -213,8 +218,8 @@ terakan_physical_device_wddm_try_create(struct terakan_instance_wddm * const ins
       goto fail_d3dkmt_adapter;
    }
 
-   /* TODO(Triang3l): Verify the memory amounts on linked physical adapters and multi-GPU graphics
-    * cards.
+   /* WDDM-only path; multi-GPU / linked-adapter VRAM accounting is not in v1.0 scope here
+    * (mesa-terakan targets a single Linux DRM Radeon device). Revisit if Windows support lands.
     */
    UINT const vram_host_visible_offset_dwords = 0x4E4;
    UINT const vram_non_host_visible_offset_dwords = 0x4E6;
@@ -235,8 +240,9 @@ terakan_physical_device_wddm_try_create(struct terakan_instance_wddm * const ins
    struct terakan_physical_device_tiling_info const tiling_info = {
       .pipes_log2 = G_0098F8_NUM_PIPES(gb_addr_config),
       .banks_log2 = 2 + G_002760_NOOFBANK(mc_arb_ramcfg),
-      /* TODO(Triang3l): Handle MC_ARB_RAMCFG::NOOFRANK in image surface logic and pass it because
-       * it's not exposed by DRM Radeon 2.50.0, but is available on Windows.
+      /* WDDM-only: NOOFRANK is visible through the Windows driver private data but not through
+       * DRM Radeon 2.50.0, so the Linux surface-logic path (the v1.0 target) cannot consume it.
+       * Plumbing it through here waits on Windows bring-up.
        */
       .pipe_interleave_bytes_log2 = 8 + G_0098F8_PIPE_INTERLEAVE_SIZE(gb_addr_config),
       .bank_interleave_log2 = G_0098F8_BANK_INTERLEAVE_SIZE(gb_addr_config),
@@ -269,11 +275,16 @@ terakan_physical_device_wddm_try_create(struct terakan_instance_wddm * const ins
 
    SYSTEM_INFO system_info;
    GetSystemInfo(&system_info);
+   /* The RB count on WDDM is not exposed through adapter_driver_private_data at any documented
+    * offset. Pass 0 (unknown) — OCCLUSION query pools fall back to VK_ERROR_FEATURE_NOT_PRESENT
+    * on the WDDM path until a device-private query can be plumbed. The RADEON_INFO_NUM_BACKENDS
+    * path in the DRM Radeon winsys supplies the real value for Linux.
+    */
    result = terakan_physical_device_init(
       &device->base, &instance->base, &terakan_physical_device_wddm_fn, adapter_desc->DeviceId,
       system_info.dwAllocationGranularity, (VkDeviceSize)adapter_desc->SharedSystemMemory,
       vram_bytes, vram_host_visible_bytes, UINT32_MAX & ~(system_info.dwAllocationGranularity - 1),
-      system_info.dwAllocationGranularity, &tiling_info, &submission_info_gfx,
+      system_info.dwAllocationGranularity, &tiling_info, 0, 2, &submission_info_gfx,
       clock_crystal_frequency_hz, device->sync_types);
    if (result != VK_SUCCESS) {
       goto fail_d3dkmt_adapter;
